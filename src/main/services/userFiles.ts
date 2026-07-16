@@ -19,6 +19,8 @@ const EXTENSION_KIND = new Map<string, UserFileKind>([
   ['.heic', 'image'], ['.svg', 'image'],
   ['.mp4', 'video'], ['.mov', 'video'], ['.avi', 'video'], ['.mkv', 'video'],
   ['.wmv', 'video'], ['.flv', 'video'], ['.webm', 'video'], ['.m4v', 'video'], ['.3gp', 'video'],
+  ['.txt', 'text'], ['.text', 'text'], ['.md', 'text'], ['.markdown', 'text'],
+  ['.log', 'text'], ['.nfo', 'text'],
   ['.doc', 'word'], ['.docx', 'word'], ['.rtf', 'word'], ['.odt', 'word'],
   ['.ppt', 'powerpoint'], ['.pptx', 'powerpoint'], ['.pps', 'powerpoint'],
   ['.ppsx', 'powerpoint'], ['.odp', 'powerpoint'],
@@ -97,7 +99,7 @@ async function getPersonalRoots(): Promise<PersonalRoot[]> {
   return roots
 }
 
-function detectKind(name: string): UserFileKind | undefined {
+export function detectUserFileKind(name: string): UserFileKind | undefined {
   const extension = path.extname(name).toLowerCase()
   return EXTENSION_KIND.get(extension)
     ?? (extension === '.exe' && /(?:^|[._\-\s])(setup|installer?|安装包)(?:[._\-\s]|$)/i.test(name)
@@ -196,7 +198,7 @@ export async function scanPersonalFiles(
 
         try {
           if (entry.isSymbolicLink()) continue
-          const direntKind = entry.isFile() ? detectKind(entry.name) : undefined
+          const direntKind = entry.isFile() ? detectUserFileKind(entry.name) : undefined
           if (entry.isFile() && !direntKind) continue
           const stat = await fs.lstat(candidate)
           if (stat.isSymbolicLink()) continue
@@ -206,7 +208,7 @@ export async function scanPersonalFiles(
             if (!isPathInsideOrEqual(root.realRoot, realCandidate)) continue
             directories.push(candidate)
           } else if (stat.isFile()) {
-            const kind = direntKind ?? detectKind(entry.name)
+            const kind = direntKind ?? detectUserFileKind(entry.name)
             if (!kind) continue
             const realCandidate = await fs.realpath(candidate)
             if (!isPathInsideOrEqual(root.realRoot, realCandidate)) continue

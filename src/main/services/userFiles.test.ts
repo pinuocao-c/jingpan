@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { InternalUserFile } from './userFiles'
-import { verifyUserFileSnapshot } from './userFiles'
+import { detectUserFileKind, verifyUserFileSnapshot } from './userFiles'
 
 describe('personal file snapshot verification', () => {
   it('rejects a file that changed after scanning', async () => {
@@ -36,5 +36,15 @@ describe('personal file snapshot verification', () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('personal file classification', () => {
+  it('classifies common text documents without treating scripts as documents', () => {
+    expect(detectUserFileKind('readme.txt')).toBe('text')
+    expect(detectUserFileKind('notes.md')).toBe('text')
+    expect(detectUserFileKind('history.log')).toBe('text')
+    expect(detectUserFileKind('cleanup.ps1')).toBeUndefined()
+    expect(detectUserFileKind('launch.bat')).toBeUndefined()
   })
 })

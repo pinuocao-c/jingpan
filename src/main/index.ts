@@ -304,6 +304,26 @@ function registerIpc(): void {
     return { movedToRecycleBin, failed, movedIds, failedIds, errors }
   })
 
+  ipcMain.handle('user-files:open', async (event, fileId: unknown) => {
+    assertTrustedSender(event)
+    if (typeof fileId !== 'string') return { opened: false, message: '无效的文件选择' }
+    const file = userFileMap.get(fileId)
+    if (!file) return { opened: false, message: '文件列表已过期，请重新扫描' }
+    if (file.kind === 'installer') {
+      return {
+        opened: false,
+        message: '为避免误运行安装程序，安装包不支持直接打开；可使用右侧按钮查看所在位置'
+      }
+    }
+    if (!(await verifyUserFileSnapshot(file))) {
+      return { opened: false, message: '文件已发生变化，请重新扫描后再打开' }
+    }
+    const error = await shell.openPath(file.path)
+    return error
+      ? { opened: false, message: `无法打开文件：${error}` }
+      : { opened: true, message: '' }
+  })
+
   ipcMain.handle('user-files:reveal', (event, fileId: unknown) => {
     assertTrustedSender(event)
     if (typeof fileId !== 'string') return false

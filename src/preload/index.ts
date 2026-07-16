@@ -15,6 +15,7 @@ const api: JingpanApi = {
   scanUserFiles: () => ipcRenderer.invoke('user-files:scan'),
   cancelUserFileScan: () => ipcRenderer.invoke('user-files:cancel'),
   recycleUserFiles: (fileIds: string[]) => ipcRenderer.invoke('user-files:recycle', fileIds),
+  openUserFile: (fileId: string) => ipcRenderer.invoke('user-files:open', fileId),
   revealUserFile: (fileId: string) => ipcRenderer.invoke('user-files:reveal', fileId),
   scanInstalledApps: () => ipcRenderer.invoke('apps:scan'),
   launchAppUninstaller: (appId: string) => ipcRenderer.invoke('apps:uninstall', appId),

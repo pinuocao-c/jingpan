@@ -18,6 +18,7 @@ import {
   LayoutDashboard,
   LoaderCircle,
   MonitorCog,
+  NotepadText,
   Package,
   Presentation,
   RefreshCw,
@@ -29,7 +30,7 @@ import {
   TriangleAlert,
   X
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AnalysisResult,
   AppSnapshot,
@@ -58,21 +59,22 @@ type Dialog =
 const FILE_KIND_META: Record<UserFileKind, { label: string; icon: typeof FileImage; color: string }> = {
   image: { label: '图片', icon: FileImage, color: '#ec6f8c' },
   video: { label: '视频', icon: FileVideo, color: '#7856ff' },
+  text: { label: '文本', icon: NotepadText, color: '#64748b' },
   word: { label: 'Word', icon: FileText, color: '#3978dc' },
   powerpoint: { label: 'PPT', icon: Presentation, color: '#e66b3d' },
   spreadsheet: { label: '表格', icon: FileSpreadsheet, color: '#24a26a' },
   pdf: { label: 'PDF', icon: FileType2, color: '#e04f55' },
-  archive: { label: '压缩包', icon: Archive, color: '#8c6b48' }
-  ,installer: { label: '安装包', icon: Package, color: '#e18c2f' }
+  archive: { label: '压缩包', icon: Archive, color: '#8c6b48' },
+  installer: { label: '安装包', icon: Package, color: '#e18c2f' }
 }
 
-const navItems: Array<{ id: Page; label: string; icon: typeof Gauge }> = [
-  { id: 'overview', label: '空间概览', icon: LayoutDashboard },
-  { id: 'cleanup', label: '安全清理', icon: Sparkles },
-  { id: 'analysis', label: '空间分析', icon: BarChart3 },
-  { id: 'files', label: '个人文件', icon: FileText },
-  { id: 'apps', label: '应用管理', icon: AppWindow },
-  { id: 'settings', label: '设置与帮助', icon: Settings }
+const navItems: Array<{ id: Page; label: string; description: string; icon: typeof Gauge }> = [
+  { id: 'overview', label: '空间概览', description: '查看 C 盘容量和建议操作', icon: LayoutDashboard },
+  { id: 'cleanup', label: '安全清理', description: '扫描并清理白名单缓存', icon: Sparkles },
+  { id: 'analysis', label: '空间分析', description: '了解系统与文件空间占用', icon: BarChart3 },
+  { id: 'files', label: '个人文件', description: '筛选、预览并整理个人文件', icon: FileText },
+  { id: 'apps', label: '应用管理', description: '查找闲置软件并安全卸载', icon: AppWindow },
+  { id: 'settings', label: '设置与帮助', description: '打开系统工具和安全说明', icon: Settings }
 ]
 
 function App(): React.JSX.Element {
@@ -89,6 +91,7 @@ function App(): React.JSX.Element {
   const [dialog, setDialog] = useState<Dialog>(null)
   const [toast, setToast] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null)
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null)
+  const openingFiles = useRef(new Set<string>())
 
   useEffect(() => window.jingpan.onProgress(setProgress), [])
 
@@ -221,6 +224,19 @@ function App(): React.JSX.Element {
     }
   }
 
+  const openUserFile = async (fileId: string): Promise<void> => {
+    if (openingFiles.current.has(fileId)) return
+    openingFiles.current.add(fileId)
+    try {
+      const result = await window.jingpan.openUserFile(fileId)
+      if (!result.opened) setToast({ tone: 'warning', text: result.message })
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '无法打开文件' })
+    } finally {
+      openingFiles.current.delete(fileId)
+    }
+  }
+
   const cancelBusy = (): void => {
     if (busy === 'scan') void window.jingpan.cancelScan()
     if (busy === 'clean') void window.jingpan.cancelCleanup()
@@ -260,6 +276,7 @@ function App(): React.JSX.Element {
             selected={selectedFiles}
             onScan={runUserFileScan}
             onSelectedChange={setSelectedFiles}
+            onOpen={openUserFile}
             onRecycle={(ids, bytes) => setDialog({ type: 'recycle', ids, bytes })}
           />
         )
@@ -282,7 +299,8 @@ function App(): React.JSX.Element {
             const Icon = item.icon
             return (
               <button key={item.id} className={page === item.id ? 'active' : ''} onClick={() => setPage(item.id)}>
-                <Icon size={19} /><span>{item.label}</span>
+                <Icon size={19} />
+                <span className="nav-copy"><span>{item.label}</span><small>{item.description}</small></span>
               </button>
             )
           })}
@@ -291,7 +309,7 @@ function App(): React.JSX.Element {
           <ShieldCheck size={22} />
           <div><strong>安全模式始终开启</strong><span>系统目录只读分析</span></div>
         </div>
-        <div className="sidebar-version">净盘 v{snapshot?.version ?? '0.1.0'}</div>
+        <div className="sidebar-version">净盘 v{snapshot?.version ?? '0.1.1'}</div>
       </aside>
 
       <main className="main-area">
@@ -458,6 +476,7 @@ function PersonalFilesPage({
   selected,
   onScan,
   onSelectedChange,
+  onOpen,
   onRecycle
 }: {
   result: UserFileScanResult | null
@@ -465,6 +484,7 @@ function PersonalFilesPage({
   selected: Set<string>
   onScan: () => void
   onSelectedChange: (selected: Set<string>) => void
+  onOpen: (fileId: string) => void
   onRecycle: (ids: string[], bytes: number) => void
 }): React.JSX.Element {
   const [kind, setKind] = useState<UserFileKind | 'all'>('all')
@@ -509,7 +529,7 @@ function PersonalFilesPage({
 
   return (
     <div className="page-stack">
-      <PageIntro title="个人文件" description="只整理位于 C 盘的图片、视频和办公文档。只有你勾选的文件才会被移入回收站。" action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新整理' : '扫描个人文件'}</button>} />
+      <PageIntro title="个人文件" description="整理位于 C 盘的图片、视频、文本和办公文档。点击文件行可直接打开预览，只有勾选的文件才会移入回收站。" action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新整理' : '扫描个人文件'}</button>} />
       {!result ? <EmptyState icon={FileText} title="整理 C 盘个人文件，找回更多空间" description="扫描位于 C 盘的桌面、下载、文档、图片、视频与 OneDrive，不读取文件内容。" button="开始整理" onClick={onScan} /> : (
         <>
           {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>文件数量较多</strong>共找到 {result.totalMatched.toLocaleString('zh-CN')} 项，当前展示占用最大的 {result.files.length.toLocaleString('zh-CN')} 项。</span></div>}
@@ -529,9 +549,9 @@ function PersonalFilesPage({
               <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
               <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
             </div>
-            <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件</span><span>修改日期</span><span>大小</span><span /></div>
+            <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（点击可打开或预览）</span><span>修改日期</span><span>大小</span><span /></div>
             <div className="file-table">
-              {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
+              {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
             </div>
             <div className="pagination"><span>第 {page} / {pageCount} 页</span><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button></div>
           </section>
@@ -546,15 +566,29 @@ function PersonalFilesPage({
   )
 }
 
-function UserFileRow({ file, checked, onToggle }: { file: UserFileItem; checked: boolean; onToggle: () => void }): React.JSX.Element {
+function UserFileRow({ file, checked, onOpen, onToggle }: { file: UserFileItem; checked: boolean; onOpen: () => void; onToggle: () => void }): React.JSX.Element {
   const meta = FILE_KIND_META[file.kind]
   const Icon = meta.icon
+  const directOpenAllowed = file.kind !== 'installer'
   return (
-    <div className={`file-row ${checked ? 'selected' : ''}`}>
-      <button className={`checkbox ${checked ? 'checked' : ''}`} onClick={onToggle}>{checked && <Check size={14} />}</button>
+    <div
+      className={`file-row ${checked ? 'selected' : ''} ${directOpenAllowed ? 'openable' : 'protected-file'}`}
+      role="button"
+      tabIndex={0}
+      title={directOpenAllowed ? `打开或预览 ${file.name}` : '安装包为避免误运行，不支持直接打开'}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
+    >
+      <button className={`checkbox ${checked ? 'checked' : ''}`} aria-label={`选择 ${file.name}`} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
       <div className="file-name"><span style={{ color: meta.color }}><Icon size={19} /></span><div><strong title={file.name}>{file.name}</strong><small title={file.path}>{file.path}</small></div></div>
       <span>{formatDate(file.modifiedAt)}</span><b>{formatBytes(file.bytes)}</b>
-      <button className="icon-button" title="打开所在文件夹" onClick={() => void window.jingpan.revealUserFile(file.id)}><FolderOpen size={17} /></button>
+      <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); void window.jingpan.revealUserFile(file.id) }}><FolderOpen size={17} /></button>
     </div>
   )
 }

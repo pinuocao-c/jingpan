@@ -93,6 +93,7 @@ export interface AnalysisResult {
 export type UserFileKind =
   | 'image'
   | 'video'
+  | 'text'
   | 'word'
   | 'powerpoint'
   | 'spreadsheet'
@@ -134,6 +135,11 @@ export interface UserFileDeleteResult {
   movedIds: string[]
   failedIds: string[]
   errors: string[]
+}
+
+export interface UserFileOpenResult {
+  opened: boolean
+  message: string
 }
 
 export type AppUsageStatus = 'recent' | 'stale' | 'very-stale' | 'unknown'
@@ -178,6 +184,7 @@ export interface JingpanApi {
   scanUserFiles: () => Promise<UserFileScanResult>
   cancelUserFileScan: () => Promise<void>
   recycleUserFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
+  openUserFile: (fileId: string) => Promise<UserFileOpenResult>
   revealUserFile: (fileId: string) => Promise<boolean>
   scanInstalledApps: () => Promise<InstalledAppScanResult>
   launchAppUninstaller: (appId: string) => Promise<UninstallLaunchResult>

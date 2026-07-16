@@ -11,9 +11,10 @@
 - 浏览器缓存覆盖 Edge、Chrome、Firefox、Brave、Chromium 与 Opera
 - Windows、应用、用户目录和 ProgramData 空间分析
 - 超过 500 MB 的大文件只读列表
-- 图片、视频、Word、PPT、表格、PDF、压缩包和安装包分类
+- 图片、视频、TXT/Markdown/日志文本、Word、PPT、表格、PDF、压缩包和安装包分类
 - 只整理位于 C 盘的个人目录，支持位置、90/180/365 天未修改、类型、名称与大小筛选
 - 个人文件搜索、排序、分页与批量选择
+- 点击文件行即可使用 Windows 默认应用打开或预览；安装包会阻止直接运行
 - 选择的个人文件移入 Windows 回收站，不做永久删除
 - 已安装应用搜索、估算大小、所在磁盘和闲置程度筛选
 - 通过软件登记的正式卸载程序或 Windows 应用设置卸载
@@ -79,7 +80,7 @@ scripts/      可重复生成资源的脚本
 
 ## 发布到 GitHub
 
-项目已包含 Windows 自动构建工作流。推送标签（例如 `v0.1.0`）后，GitHub Actions 会执行类型检查、测试、构建，并上传 Windows 安装包构建产物。
+项目已包含 Windows 自动构建工作流。推送标签（例如 `v0.1.1`）后，GitHub Actions 会执行类型检查、测试、构建，并上传 Windows 安装包构建产物。
 
 正式公开发布前，建议购买 Windows 代码签名证书并配置签名。未签名安装包会触发 Windows SmartScreen 提示，这不适合直接面向大量小白用户分发。
 

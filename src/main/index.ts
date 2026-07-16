@@ -7,6 +7,11 @@ import type { CategoryId, TaskProgress } from '../shared/types'
 import { analyzeSystemDrive } from './services/analyzer'
 import { launchUninstaller, scanInstalledApps, type InternalApp } from './services/apps'
 import { CATEGORY_META } from './services/catalog'
+import {
+  scanChatFiles,
+  verifyChatFileSnapshot,
+  type InternalChatFile
+} from './services/chatFiles'
 import { cleanCategories } from './services/cleaner'
 import type { TaskController } from './services/filesystem'
 import { scanCleanupCategories } from './services/scanner'
@@ -20,11 +25,12 @@ import { fetchLatestUpdate, type TrustedUpdate } from './services/updates'
 
 let mainWindow: BrowserWindow | null = null
 let activeTask: {
-  kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'apps'
+  kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'chat-files' | 'apps'
   controller: TaskController
 } | null = null
 let revealedPaths = new Set<string>()
 let userFileMap = new Map<string, InternalUserFile>()
+let chatFileMap = new Map<string, InternalChatFile>()
 let installedAppMap = new Map<string, InternalApp>()
 let cachedUpdate: TrustedUpdate | null = null
 let updateCheckPromise: Promise<TrustedUpdate> | null = null
@@ -138,7 +144,7 @@ function sendProgress(progress: TaskProgress): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:progress', progress)
 }
 
-function beginTask(kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'apps'): TaskController {
+function beginTask(kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'chat-files' | 'apps'): TaskController {
   if (activeTask) throw new Error(`已有${activeTask.kind}任务正在运行`)
   const controller = { cancelled: false }
   activeTask = { kind, controller }
@@ -349,6 +355,96 @@ function registerIpc(): void {
     assertTrustedSender(event)
     if (typeof fileId !== 'string') return false
     const file = userFileMap.get(fileId)
+    if (!file) return false
+    shell.showItemInFolder(file.path)
+    return true
+  })
+
+  ipcMain.handle('chat-files:scan', async (event) => {
+    assertTrustedSender(event)
+    chatFileMap.clear()
+    const controller = beginTask('chat-files')
+    try {
+      const { result, internal } = await scanChatFiles(controller, sendProgress)
+      chatFileMap = internal
+      return result
+    } finally {
+      finishTask(controller)
+    }
+  })
+
+  ipcMain.handle('chat-files:cancel', (event) => {
+    assertTrustedSender(event)
+    if (activeTask?.kind === 'chat-files') activeTask.controller.cancelled = true
+  })
+
+  ipcMain.handle('chat-files:recycle', async (event, fileIds: unknown) => {
+    assertTrustedSender(event)
+    if (!Array.isArray(fileIds) || !fileIds.every((id) => typeof id === 'string')) {
+      throw new Error('无效的聊天文件选择')
+    }
+    const uniqueIds = [...new Set(fileIds)]
+    if (uniqueIds.length === 0 || uniqueIds.length > MAX_RECYCLE_BATCH) {
+      throw new Error(`每次最多处理 ${MAX_RECYCLE_BATCH.toLocaleString('zh-CN')} 个文件`)
+    }
+    let movedToRecycleBin = 0
+    let failed = 0
+    const movedIds: string[] = []
+    const failedIds: string[] = []
+    const errors: string[] = []
+    for (const id of uniqueIds) {
+      const file = chatFileMap.get(id)
+      if (!file) {
+        failed += 1
+        failedIds.push(id)
+        continue
+      }
+      try {
+        if (!(await verifyChatFileSnapshot(file))) {
+          failed += 1
+          failedIds.push(id)
+          if (errors.length < 10) errors.push(`${file.name} 已发生变化，请重新扫描后再操作`)
+          continue
+        }
+        await shell.trashItem(file.path)
+        chatFileMap.delete(id)
+        movedToRecycleBin += 1
+        movedIds.push(id)
+      } catch (error) {
+        failed += 1
+        failedIds.push(id)
+        if (errors.length < 10) errors.push(error instanceof Error ? error.message : String(error))
+      }
+    }
+    return { movedToRecycleBin, failed, movedIds, failedIds, errors }
+  })
+
+  ipcMain.handle('chat-files:open', async (event, fileId: unknown) => {
+    assertTrustedSender(event)
+    if (typeof fileId !== 'string') return { opened: false, message: '无效的聊天文件选择' }
+    const file = chatFileMap.get(fileId)
+    if (!file) return { opened: false, message: '聊天文件列表已过期，请重新扫描' }
+    if (!file.previewable) {
+      const message = file.extension === '.dat'
+        ? '这是微信加密保存的图片缓存，无法直接预览；可用右侧按钮查看所在位置'
+        : file.kind === 'installer'
+          ? '为避免误运行安装程序，此文件不支持直接打开；可用右侧按钮查看所在位置'
+          : '此类聊天附件不支持安全预览；可用右侧按钮查看所在位置'
+      return { opened: false, message }
+    }
+    if (!(await verifyChatFileSnapshot(file))) {
+      return { opened: false, message: '聊天文件已发生变化，请重新扫描后再打开' }
+    }
+    const error = await shell.openPath(file.path)
+    return error
+      ? { opened: false, message: `无法打开聊天文件：${error}` }
+      : { opened: true, message: '' }
+  })
+
+  ipcMain.handle('chat-files:reveal', (event, fileId: unknown) => {
+    assertTrustedSender(event)
+    if (typeof fileId !== 'string') return false
+    const file = chatFileMap.get(fileId)
     if (!file) return false
     shell.showItemInFolder(file.path)
     return true

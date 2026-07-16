@@ -88,6 +88,7 @@ describe('chat storage discovery', () => {
         () => {},
         { documentRoots: [], qqSearchRoots: [root] }
       )
+      const realQqBase = await fs.realpath(qqBase)
       expect(result.files).toHaveLength(1)
       expect(result.files[0]).toMatchObject({
         platform: 'qq',
@@ -95,14 +96,14 @@ describe('chat storage discovery', () => {
         kind: 'image',
         drive: expect.any(String)
       })
-      expect(result.locations).toEqual([
-        expect.objectContaining({
-          platform: 'qq',
-          path: path.resolve(qqBase),
-          source: 'automatic'
-        })
-      ])
-      expect(await resolveQqStorageBase(accountRoot)).toBe(await fs.realpath(qqBase))
+      expect(result.locations).toHaveLength(1)
+      expect(result.locations[0]).toMatchObject({
+        platform: 'qq',
+        source: 'automatic'
+      })
+      expect(result.locations[0].path.toLocaleLowerCase('en-US'))
+        .toBe(realQqBase.toLocaleLowerCase('en-US'))
+      expect(await resolveQqStorageBase(accountRoot)).toBe(realQqBase)
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

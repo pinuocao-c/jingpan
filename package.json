@@ -1,6 +1,6 @@
 {
   "name": "jingpan",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "一个安全、直观的 Windows C 盘清理与空间管理工具",
   "main": "out/main/index.js",
   "author": "Jingpan Contributors",

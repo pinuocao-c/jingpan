@@ -19,6 +19,9 @@ const api: JingpanApi = {
   revealUserFile: (fileId: string) => ipcRenderer.invoke('user-files:reveal', fileId),
   scanInstalledApps: () => ipcRenderer.invoke('apps:scan'),
   launchAppUninstaller: (appId: string) => ipcRenderer.invoke('apps:uninstall', appId),
+  checkForUpdates: (force = false) => ipcRenderer.invoke('updates:check', force),
+  downloadUpdate: () => ipcRenderer.invoke('updates:download'),
+  openUpdatePage: () => ipcRenderer.invoke('updates:open-page'),
   onProgress: (listener: (progress: TaskProgress) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: TaskProgress): void => listener(progress)
     ipcRenderer.on('task:progress', handler)

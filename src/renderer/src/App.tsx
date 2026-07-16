@@ -7,6 +7,8 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
+  Download,
+  ExternalLink,
   FileImage,
   FileSpreadsheet,
   FileText,
@@ -41,6 +43,7 @@ import type {
   ScanResult,
   ScannedCategory,
   TaskProgress,
+  UpdateCheckResult,
   UserFileItem,
   UserFileKind,
   UserFileLocation,
@@ -91,7 +94,11 @@ function App(): React.JSX.Element {
   const [dialog, setDialog] = useState<Dialog>(null)
   const [toast, setToast] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null)
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null)
+  const [update, setUpdate] = useState<UpdateCheckResult | null>(null)
+  const [updateChecking, setUpdateChecking] = useState(false)
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
   const openingFiles = useRef(new Set<string>())
+  const checkingUpdate = useRef(false)
 
   useEffect(() => window.jingpan.onProgress(setProgress), [])
 
@@ -119,6 +126,68 @@ function App(): React.JSX.Element {
     }).catch(() => setToast({ tone: 'warning', text: '无法读取磁盘信息，请重新打开应用' }))
     return () => { alive = false }
   }, [])
+
+  const checkForUpdates = useCallback(async (showResult: boolean): Promise<void> => {
+    if (checkingUpdate.current) return
+    checkingUpdate.current = true
+    setUpdateChecking(true)
+    try {
+      const result = await window.jingpan.checkForUpdates(showResult)
+      setUpdate(result)
+      if (showResult) {
+        setToast({
+          tone: result.status === 'error' ? 'warning' : 'success',
+          text: result.message
+        })
+      }
+    } catch (error) {
+      if (showResult) {
+        setToast({
+          tone: 'warning',
+          text: error instanceof Error ? error.message : '暂时无法检查更新'
+        })
+      }
+    } finally {
+      checkingUpdate.current = false
+      setUpdateChecking(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    const initialCheck = window.setTimeout(() => void checkForUpdates(false), 2_000)
+    const periodicCheck = window.setInterval(() => void checkForUpdates(false), 6 * 60 * 60 * 1_000)
+    return () => {
+      window.clearTimeout(initialCheck)
+      window.clearInterval(periodicCheck)
+    }
+  }, [checkForUpdates])
+
+  const downloadUpdate = async (): Promise<void> => {
+    try {
+      const opened = await window.jingpan.downloadUpdate()
+      setToast({
+        tone: opened ? 'success' : 'warning',
+        text: opened ? '已在默认浏览器打开官方安装包下载' : '新版安装包暂不可用，请稍后再试'
+      })
+    } catch (error) {
+      setToast({
+        tone: 'warning',
+        text: error instanceof Error ? error.message : '无法打开新版安装包下载'
+      })
+    }
+  }
+
+  const openUpdatePage = async (): Promise<void> => {
+    try {
+      const opened = await window.jingpan.openUpdatePage()
+      if (!opened) setToast({ tone: 'warning', text: '更新说明页面暂不可用' })
+    } catch (error) {
+      setToast({
+        tone: 'warning',
+        text: error instanceof Error ? error.message : '无法打开更新说明'
+      })
+    }
+  }
 
   const runAnalysis = async (): Promise<void> => {
     if (busy) return
@@ -283,7 +352,16 @@ function App(): React.JSX.Element {
       case 'apps':
         return <InstalledAppsPage result={installedApps} busy={busy} onScan={runAppScan} onUninstall={(app) => setDialog({ type: 'uninstall', app })} />
       case 'settings':
-        return <SettingsPage snapshot={snapshot} />
+        return (
+          <SettingsPage
+            snapshot={snapshot}
+            update={update}
+            checking={updateChecking}
+            onCheck={() => void checkForUpdates(true)}
+            onDownload={() => void downloadUpdate()}
+            onOpenPage={() => void openUpdatePage()}
+          />
+        )
     }
   })()
 
@@ -309,17 +387,58 @@ function App(): React.JSX.Element {
           <ShieldCheck size={22} />
           <div><strong>安全模式始终开启</strong><span>系统目录只读分析</span></div>
         </div>
-        <div className="sidebar-version">净盘 v{snapshot?.version ?? '0.1.1'}</div>
+        <div className="sidebar-version">净盘 v{snapshot?.version ?? '0.1.2'}</div>
       </aside>
 
       <main className="main-area">
         <header className="titlebar"><span>{navItems.find((item) => item.id === page)?.label}</span></header>
+        {update?.status === 'available' && update.latestVersion !== dismissedUpdateVersion && (
+          <UpdateBanner
+            update={update}
+            onDownload={() => void downloadUpdate()}
+            onOpenPage={() => void openUpdatePage()}
+            onDismiss={() => setDismissedUpdateVersion(update.latestVersion)}
+          />
+        )}
         <div className="page-container">{content}</div>
       </main>
 
       {busy && progress && <ProgressOverlay progress={progress} onCancel={cancelBusy} />}
       {dialog && <ConfirmDialog dialog={dialog} onCancel={() => setDialog(null)} onConfirm={dialog.type === 'cleanup' ? confirmCleanup : dialog.type === 'recycle' ? confirmRecycle : confirmUninstall} />}
       {toast && <Toast tone={toast.tone} text={toast.text} onClose={() => setToast(null)} />}
+    </div>
+  )
+}
+
+function UpdateBanner({
+  update,
+  onDownload,
+  onOpenPage,
+  onDismiss
+}: {
+  update: UpdateCheckResult
+  onDownload: () => void
+  onOpenPage: () => void
+  onDismiss: () => void
+}): React.JSX.Element {
+  return (
+    <div className="update-banner-shell">
+      <section className="update-banner" role="status" aria-live="polite">
+        <span className="update-banner-icon"><Download size={20} /></span>
+        <span className="update-banner-copy">
+          <strong>净盘 v{update.latestVersion} 已发布</strong>
+          <small>
+            {update.downloadAvailable
+              ? `官方安装包 ${formatBytes(update.assetBytes)}，下载后运行即可升级。`
+              : '新版安装包正在准备中，可先查看更新说明。'}
+          </small>
+        </span>
+        <span className="update-banner-actions">
+          <button className="update-notes-button" onClick={onOpenPage}><ExternalLink size={15} />更新说明</button>
+          <button className="update-download-button" disabled={!update.downloadAvailable} onClick={onDownload}><Download size={15} />{update.downloadAvailable ? '下载更新' : '准备中'}</button>
+        </span>
+        <button className="update-dismiss-button" aria-label="暂时关闭更新提醒" title="暂时关闭" onClick={onDismiss}><X size={17} /></button>
+      </section>
     </div>
   )
 }
@@ -593,11 +712,39 @@ function UserFileRow({ file, checked, onOpen, onToggle }: { file: UserFileItem; 
   )
 }
 
-function SettingsPage({ snapshot }: { snapshot: AppSnapshot }): React.JSX.Element {
+function SettingsPage({
+  snapshot,
+  update,
+  checking,
+  onCheck,
+  onDownload,
+  onOpenPage
+}: {
+  snapshot: AppSnapshot
+  update: UpdateCheckResult | null
+  checking: boolean
+  onCheck: () => void
+  onDownload: () => void
+  onOpenPage: () => void
+}): React.JSX.Element {
+  const updateDescription = checking
+    ? '正在连接 GitHub 检查正式版本…'
+    : update?.status === 'available'
+      ? `${update.message}${update.downloadAvailable ? `，安装包 ${formatBytes(update.assetBytes)}` : ''}`
+      : update?.message ?? '启动后自动检查，软件运行期间每 6 小时检查一次。'
   return (
     <div className="page-stack">
       <PageIntro title="设置与帮助" description="净盘坚持本地运行、透明规则和可恢复操作。" />
       <section className="content-card settings-list">
+        <div>
+          <span className="setting-icon"><RefreshCw className={checking ? 'spin' : ''} /></span>
+          <span><strong>软件更新</strong><small>{updateDescription}</small></span>
+          <span className="setting-actions">
+            {update?.status === 'available' && <button className="link-button" onClick={onOpenPage}>更新说明</button>}
+            {update?.status === 'available' && update.downloadAvailable && <button className="setting-download-button" onClick={onDownload}><Download size={14} />下载更新</button>}
+            <button className="link-button" disabled={checking} onClick={onCheck}>{checking ? '检查中' : '检查更新'}</button>
+          </span>
+        </div>
         <div><span className="setting-icon"><ShieldCheck /></span><span><strong>安全清理白名单</strong><small>只允许清理程序内置的临时文件和缓存目录，界面无法提交任意路径。</small></span><em className="enabled-badge">已开启</em></div>
         <div><span className="setting-icon"><MonitorCog /></span><span><strong>管理员权限</strong><small>{snapshot.isAdministrator ? '当前以管理员身份运行，可扫描更多 Windows 临时文件。' : '当前为普通权限；受保护文件会被安全跳过，无需特意提权。'}</small></span><em className={snapshot.isAdministrator ? 'enabled-badge' : 'neutral-badge'}>{snapshot.isAdministrator ? '管理员' : '普通权限'}</em></div>
         <div><span className="setting-icon"><HardDrive /></span><span><strong>Windows 存储设置</strong><small>需要管理已安装应用或系统存储感知时，请使用 Windows 官方页面。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageSettings()}>打开设置</button></div>

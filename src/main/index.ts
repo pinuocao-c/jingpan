@@ -16,6 +16,7 @@ import {
   verifyUserFileSnapshot,
   type InternalUserFile
 } from './services/userFiles'
+import { fetchLatestUpdate, type TrustedUpdate } from './services/updates'
 
 let mainWindow: BrowserWindow | null = null
 let activeTask: {
@@ -25,6 +26,8 @@ let activeTask: {
 let revealedPaths = new Set<string>()
 let userFileMap = new Map<string, InternalUserFile>()
 let installedAppMap = new Map<string, InternalApp>()
+let cachedUpdate: TrustedUpdate | null = null
+let updateCheckPromise: Promise<TrustedUpdate> | null = null
 let cleanupSession: {
   scanId: string
   expiresAt: number
@@ -33,6 +36,24 @@ let cleanupSession: {
 
 const CLEANUP_SESSION_TTL_MS = 30 * 60 * 1000
 const MAX_RECYCLE_BATCH = 2_000
+const UPDATE_CACHE_TTL_MS = 30 * 60 * 1000
+const UPDATE_ERROR_CACHE_TTL_MS = 60 * 1000
+
+async function checkForUpdates(force = false): Promise<TrustedUpdate> {
+  const cachedAt = cachedUpdate ? new Date(cachedUpdate.checkedAt).getTime() : 0
+  const cacheTtl = cachedUpdate?.status === 'error' ? UPDATE_ERROR_CACHE_TTL_MS : UPDATE_CACHE_TTL_MS
+  if (!force && cachedUpdate && Date.now() - cachedAt < cacheTtl) return cachedUpdate
+  if (updateCheckPromise) return updateCheckPromise
+  updateCheckPromise = fetchLatestUpdate(app.getVersion())
+    .then((result) => {
+      cachedUpdate = result
+      return result
+    })
+    .finally(() => {
+      updateCheckPromise = null
+    })
+  return updateCheckPromise
+}
 
 function getTrustedDevUrl(): string | null {
   if (app.isPackaged || !process.env.ELECTRON_RENDERER_URL) return null
@@ -366,6 +387,33 @@ function registerIpc(): void {
         message: `无法直接启动卸载程序，已打开 Windows 应用设置：${error instanceof Error ? error.message : String(error)}`
       }
     }
+  })
+
+  ipcMain.handle('updates:check', async (event, force: unknown) => {
+    assertTrustedSender(event)
+    if (typeof force !== 'boolean') throw new Error('无效的更新检查请求')
+    const { downloadUrl: _downloadUrl, releaseUrl: _releaseUrl, ...result } = await checkForUpdates(force)
+    return result
+  })
+
+  ipcMain.handle('updates:download', async (event) => {
+    assertTrustedSender(event)
+    const update = await checkForUpdates()
+    if (
+      update.status !== 'available'
+      || !update.downloadAvailable
+      || !update.downloadUrl
+    ) return false
+    await shell.openExternal(update.downloadUrl, { activate: true, logUsage: true })
+    return true
+  })
+
+  ipcMain.handle('updates:open-page', async (event) => {
+    assertTrustedSender(event)
+    const update = await checkForUpdates()
+    if (!update.releaseUrl) return false
+    await shell.openExternal(update.releaseUrl, { activate: true, logUsage: true })
+    return true
   })
 }
 

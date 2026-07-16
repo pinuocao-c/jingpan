@@ -142,6 +142,21 @@ export interface UserFileOpenResult {
   message: string
 }
 
+export interface UpdateCheckResult {
+  status: 'available' | 'current' | 'error'
+  currentVersion: string
+  latestVersion: string | null
+  releaseName: string | null
+  releaseNotes: string
+  publishedAt: string | null
+  assetName: string | null
+  assetBytes: number
+  assetDigest: string | null
+  downloadAvailable: boolean
+  checkedAt: string
+  message: string
+}
+
 export type AppUsageStatus = 'recent' | 'stale' | 'very-stale' | 'unknown'
 
 export interface InstalledApp {
@@ -188,5 +203,8 @@ export interface JingpanApi {
   revealUserFile: (fileId: string) => Promise<boolean>
   scanInstalledApps: () => Promise<InstalledAppScanResult>
   launchAppUninstaller: (appId: string) => Promise<UninstallLaunchResult>
+  checkForUpdates: (force?: boolean) => Promise<UpdateCheckResult>
+  downloadUpdate: () => Promise<boolean>
+  openUpdatePage: () => Promise<boolean>
   onProgress: (listener: (progress: TaskProgress) => void) => () => void
 }

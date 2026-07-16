@@ -1,0 +1,77 @@
+{
+  "name": "jingpan",
+  "version": "0.1.0",
+  "description": "一个安全、直观的 Windows C 盘清理与空间管理工具",
+  "main": "out/main/index.js",
+  "author": "Jingpan Contributors",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pinuocao-c/jingpan.git"
+  },
+  "homepage": "https://github.com/pinuocao-c/jingpan#readme",
+  "bugs": {
+    "url": "https://github.com/pinuocao-c/jingpan/issues"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "npm run build && electron-builder --win nsis",
+    "dist:portable": "npm run build && electron-builder --win portable"
+  },
+  "build": {
+    "appId": "com.jingpan.desktop",
+    "productName": "净盘",
+    "asar": true,
+    "afterPack": "scripts/after-pack.cjs",
+    "artifactName": "Jingpan-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "resources/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "净盘",
+      "deleteAppDataOnUninstall": false
+    }
+  },
+  "dependencies": {
+    "lucide-react": "^1.24.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@electron/fuses": "^2.0.0",
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.6",
+    "vitest": "^3.2.6"
+  }
+}

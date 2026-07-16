@@ -142,6 +142,64 @@ export interface UserFileOpenResult {
   message: string
 }
 
+export type ChatPlatform = 'wechat' | 'qq'
+
+export type ChatFileKind =
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'text'
+  | 'word'
+  | 'powerpoint'
+  | 'spreadsheet'
+  | 'pdf'
+  | 'archive'
+  | 'installer'
+  | 'other'
+
+export type ChatFileArea =
+  | 'file'
+  | 'attachment'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'cache'
+  | 'sticker'
+  | 'temporary'
+
+export interface ChatAccountSummary {
+  id: string
+  platform: ChatPlatform
+  label: string
+  fileCount: number
+  bytes: number
+}
+
+export interface ChatFileItem {
+  id: string
+  platform: ChatPlatform
+  accountId: string
+  accountLabel: string
+  area: ChatFileArea
+  kind: ChatFileKind
+  name: string
+  path: string
+  extension: string
+  bytes: number
+  modifiedAt: string
+  previewable: boolean
+}
+
+export interface ChatFileScanResult {
+  files: ChatFileItem[]
+  accounts: ChatAccountSummary[]
+  scannedAt: string
+  durationMs: number
+  cancelled: boolean
+  truncated: boolean
+  totalMatched: number
+}
+
 export interface UpdateCheckResult {
   status: 'available' | 'current' | 'error'
   currentVersion: string
@@ -201,6 +259,11 @@ export interface JingpanApi {
   recycleUserFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
   openUserFile: (fileId: string) => Promise<UserFileOpenResult>
   revealUserFile: (fileId: string) => Promise<boolean>
+  scanChatFiles: () => Promise<ChatFileScanResult>
+  cancelChatFileScan: () => Promise<void>
+  recycleChatFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
+  openChatFile: (fileId: string) => Promise<UserFileOpenResult>
+  revealChatFile: (fileId: string) => Promise<boolean>
   scanInstalledApps: () => Promise<InstalledAppScanResult>
   launchAppUninstaller: (appId: string) => Promise<UninstallLaunchResult>
   checkForUpdates: (force?: boolean) => Promise<UpdateCheckResult>

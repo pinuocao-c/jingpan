@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { classifyChatFile, scanChatFiles } from './chatFiles'
+import { classifyChatFile, resolveQqStorageBase, scanChatFiles } from './chatFiles'
 
 describe('chat file classification', () => {
   it('classifies office documents, media and installers', () => {
@@ -53,6 +53,7 @@ describe('chat storage discovery', () => {
       )
       expect(result.files).toHaveLength(3)
       expect(result.accounts).toHaveLength(2)
+      expect(result.locations).toHaveLength(2)
       expect(result.files.some((file) => file.name === 'message.db')).toBe(false)
       expect(result.files.find((file) => file.name === 'image.dat')).toMatchObject({
         platform: 'wechat',
@@ -64,6 +65,44 @@ describe('chat storage discovery', () => {
         kind: 'powerpoint',
         previewable: true
       })
+    } finally {
+      await fs.rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('finds a customized NTQQ Tencent Files directory outside Documents', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'jingpan-qq-custom-'))
+    const qqBase = path.join(root, '聊天数据', 'Tencent Files')
+    const accountRoot = path.join(qqBase, '3559065040')
+    const qqImage = path.join(accountRoot, 'nt_qq', 'nt_data', 'Pic', '2026-07', 'photo.jpg')
+    const qqDatabase = path.join(accountRoot, 'nt_qq', 'nt_data', 'Pic', 'message.db')
+    try {
+      await fs.mkdir(path.dirname(qqImage), { recursive: true })
+      await Promise.all([
+        fs.writeFile(qqImage, 'image'),
+        fs.writeFile(qqDatabase, 'database')
+      ])
+
+      const { result } = await scanChatFiles(
+        { cancelled: false },
+        () => {},
+        { documentRoots: [], qqSearchRoots: [root] }
+      )
+      expect(result.files).toHaveLength(1)
+      expect(result.files[0]).toMatchObject({
+        platform: 'qq',
+        accountLabel: 'QQ …065040',
+        kind: 'image',
+        drive: expect.any(String)
+      })
+      expect(result.locations).toEqual([
+        expect.objectContaining({
+          platform: 'qq',
+          path: path.resolve(qqBase),
+          source: 'automatic'
+        })
+      ])
+      expect(await resolveQqStorageBase(accountRoot)).toBe(await fs.realpath(qqBase))
     } finally {
       await fs.rm(root, { recursive: true, force: true })
     }

@@ -17,6 +17,7 @@ import {
   FileVideo,
   Files,
   FolderOpen,
+  FolderSearch,
   Gauge,
   HardDrive,
   LayoutDashboard,
@@ -258,13 +259,25 @@ function App(): React.JSX.Element {
     if (busy) return
     setBusy('chat')
     setSelectedChatFiles(new Set())
-    setProgress({ kind: 'analyze', percent: 0, title: '准备整理聊天文件', detail: '只读取 C 盘中已识别的微信与 QQ 文件目录' })
+    setProgress({ kind: 'analyze', percent: 0, title: '准备整理聊天文件', detail: '正在识别微信目录以及 QQ/NTQQ 的自定义数据位置' })
     try {
       setChatFiles(await window.jingpan.scanChatFiles())
     } catch (error) {
       setToast({ tone: 'warning', text: error instanceof Error ? error.message : '聊天文件整理未能完成' })
     } finally {
       setBusy(null)
+    }
+  }
+
+  const chooseQqStorageFolder = async (): Promise<void> => {
+    if (busy) return
+    try {
+      const result = await window.jingpan.chooseQqStorageFolder()
+      if (!result.selected) return
+      setToast({ tone: result.recognized ? 'success' : 'warning', text: result.message })
+      if (result.recognized) await runChatFileScan()
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '无法添加 QQ 文件目录' })
     }
   }
 
@@ -449,6 +462,7 @@ function App(): React.JSX.Element {
             busy={busy}
             selected={selectedChatFiles}
             onScan={runChatFileScan}
+            onChooseQqFolder={chooseQqStorageFolder}
             onSelectedChange={setSelectedChatFiles}
             onOpen={openChatFile}
             onRecycle={(ids, bytes) => setDialog({ type: 'chat-recycle', ids, bytes })}
@@ -726,6 +740,7 @@ function ChatFilesPage({
   busy,
   selected,
   onScan,
+  onChooseQqFolder,
   onSelectedChange,
   onOpen,
   onRecycle
@@ -734,6 +749,7 @@ function ChatFilesPage({
   busy: BusyTask
   selected: Set<string>
   onScan: () => void
+  onChooseQqFolder: () => void
   onSelectedChange: (selected: Set<string>) => void
   onOpen: (fileId: string) => void
   onRecycle: (ids: string[], bytes: number) => void
@@ -786,18 +802,31 @@ function ChatFilesPage({
   }, [platformFiles])
   const platformStats = useMemo(() => {
     const values = {
-      all: { files: 0, bytes: 0 },
-      wechat: { files: 0, bytes: 0 },
-      qq: { files: 0, bytes: 0 }
+      all: { files: 0, bytes: 0, otherDriveFiles: 0, otherDriveBytes: 0 },
+      wechat: { files: 0, bytes: 0, otherDriveFiles: 0, otherDriveBytes: 0 },
+      qq: { files: 0, bytes: 0, otherDriveFiles: 0, otherDriveBytes: 0 }
     }
     for (const file of result?.files ?? []) {
       values.all.files += 1
       values.all.bytes += file.bytes
       values[file.platform].files += 1
       values[file.platform].bytes += file.bytes
+      if (!file.onSystemDrive) {
+        values.all.otherDriveFiles += 1
+        values.all.otherDriveBytes += file.bytes
+        values[file.platform].otherDriveFiles += 1
+        values[file.platform].otherDriveBytes += file.bytes
+      }
     }
     return values
   }, [result])
+  const locationCounts = useMemo(() => ({
+    all: result?.locations.length ?? 0,
+    wechat: result?.locations.filter((location) => location.platform === 'wechat').length ?? 0,
+    qq: result?.locations.filter((location) => location.platform === 'qq').length ?? 0
+  }), [result])
+  const qqLocations = result?.locations.filter((location) => location.platform === 'qq') ?? []
+  const otherDriveLocations = result?.locations.filter((location) => !location.onSystemDrive) ?? []
 
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const shown = filtered.slice((page - 1) * pageSize, page * pageSize)
@@ -815,28 +844,45 @@ function ChatFilesPage({
     <div className="page-stack">
       <PageIntro
         title="微信与 QQ 聊天文件"
-        description="只整理位于 C 盘的聊天图片、视频、音频和接收文件，不读取聊天数据库。点击可预览的文件行确认内容后，再选择移入回收站。"
-        action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新扫描' : '扫描聊天文件'}</button>}
+        description="自动识别常见目录和 QQ/NTQQ 自定义数据位置；其他磁盘的文件会明确标注。不会读取聊天数据库。"
+        action={(
+          <div className="page-intro-actions">
+            <button className="secondary-button" onClick={onChooseQqFolder} disabled={Boolean(busy)}><FolderSearch size={17} />选择 QQ 目录</button>
+            <button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新扫描' : '扫描聊天文件'}</button>
+          </div>
+        )}
       />
       <div className="info-banner chat-warning">
         <TriangleAlert size={19} />
         <span><strong>建议先退出微信和 QQ 再清理</strong>移除本地文件后，聊天记录中的对应图片、视频或附件可能无法继续打开；文件会先进入 Windows 回收站。</span>
       </div>
+      {result && otherDriveLocations.length > 0 && (
+        <div className="info-banner chat-location-banner">
+          <HardDrive size={19} />
+          <span>
+            <strong>已识别其他磁盘上的聊天文件</strong>
+            位于 {[...new Set(otherDriveLocations.map((location) => location.drive))].join('、')} 盘的文件可以在这里整理，但删除它们不会释放 C 盘空间。
+          </span>
+        </div>
+      )}
+      {result && qqLocations.length === 0 && (
+        <div className="info-banner chat-location-banner unresolved">
+          <CircleHelp size={19} />
+          <span>
+            <strong>尚未识别到 QQ 文件位置</strong>
+            这不等于 QQ 没有文件。可选择 Tencent Files 文件夹，净盘会记住该位置并重新扫描。
+          </span>
+          <button className="secondary-button" onClick={onChooseQqFolder} disabled={Boolean(busy)}><FolderSearch size={16} />选择目录</button>
+        </div>
+      )}
       {!result ? (
         <EmptyState
           icon={MessageCircle}
-          title="看看微信与 QQ 在 C 盘保存了多少文件"
-          description="识别经典版与新版常见目录，按账号和文件类型整理；不会读取消息正文、联系人或聊天数据库。"
+          title="看看微信与 QQ 保存了多少本地文件"
+          description="自动识别经典版与新版常见目录，并查找 QQ 自定义数据位置；不会读取消息正文、联系人或聊天数据库。"
           button="开始扫描"
           onClick={onScan}
         />
-      ) : result.files.length === 0 ? (
-        <section className="content-card chat-not-found">
-          <MessageCircle size={36} />
-          <h2>未在 C 盘识别到聊天文件</h2>
-          <p>微信或 QQ 可能尚未保存聊天文件，或者文件存储位置已改到其他磁盘。净盘只处理 C 盘内容，不会跨盘扫描。</p>
-          <button className="secondary-button" onClick={onScan}>重新扫描</button>
-        </section>
       ) : (
         <>
           {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>文件数量较多</strong>共找到 {result.totalMatched.toLocaleString('zh-CN')} 项，当前展示占用最大的 {result.files.length.toLocaleString('zh-CN')} 项。</span></div>}
@@ -849,45 +895,65 @@ function ChatFilesPage({
               <button key={key} className={platform === key ? 'active' : ''} onClick={() => setPlatform(key)}>
                 <span><Icon size={18} /><strong>{label}</strong></span>
                 <b>{formatBytes(platformStats[key].bytes)}</b>
-                <small>{platformStats[key].files.toLocaleString('zh-CN')} 个文件</small>
+                <small>
+                  {platformStats[key].files > 0
+                    ? `${platformStats[key].files.toLocaleString('zh-CN')} 个文件${platformStats[key].otherDriveFiles > 0 ? ` · 其他盘 ${formatBytes(platformStats[key].otherDriveBytes)}` : ''}`
+                    : locationCounts[key] > 0
+                      ? `已识别 ${locationCounts[key]} 个位置，暂无可管理文件`
+                      : '未识别到文件位置'}
+                </small>
               </button>
             ))}
           </div>
-          <div className="file-kind-tabs">
-            <button className={kind === 'all' ? 'active' : ''} onClick={() => setKind('all')}><HardDrive size={17} />全部 <span>{platformFiles.length}</span></button>
-            {(Object.keys(CHAT_FILE_KIND_META) as ChatFileKind[]).map((key) => {
-              const meta = CHAT_FILE_KIND_META[key]
-              const Icon = meta.icon
-              return <button key={key} className={kind === key ? 'active' : ''} onClick={() => setKind(key)}><Icon size={17} style={{ color: meta.color }} />{meta.label} <span>{kindCounts.get(key) ?? 0}</span></button>
-            })}
-          </div>
-          <section className="content-card chat-file-browser">
-            <div className="file-toolbar">
-              <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索聊天文件名或位置" /></label>
-              <select value={account} onChange={(event) => setAccount(event.target.value)}><option value="all">全部账号</option>{availableAccounts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
-              <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="30">30 天未修改</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
-              <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
-              <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
-            </div>
-            <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（可预览时点击打开）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
-            <div className="chat-file-table">
-              {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
-                <ChatFileRow
-                  key={file.id}
-                  file={file}
-                  checked={selected.has(file.id)}
-                  onOpen={() => onOpen(file.id)}
-                  onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
-                />
-              ))}
-            </div>
-            <div className="pagination"><span>第 {page} / {pageCount} 页</span><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button></div>
-          </section>
-          <div className="sticky-action file-action">
-            <div><span>已选择 {selected.size} 个聊天文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
-            <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
-            <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
-          </div>
+          {result.files.length === 0 ? (
+            <section className="content-card chat-not-found">
+              <MessageCircle size={36} />
+              <h2>{result.locations.length > 0 ? '已识别聊天目录，暂无可管理文件' : '未识别到聊天文件位置'}</h2>
+              <p>{result.locations.length > 0 ? '目录中可能暂时没有图片、视频、音频或接收文件，消息数据库不会显示在这里。' : '这不代表电脑里一定没有聊天文件。你可以重新扫描，或手动选择 QQ 的 Tencent Files 数据目录。'}</p>
+              <div className="chat-empty-actions">
+                <button className="secondary-button" onClick={onChooseQqFolder}><FolderSearch size={16} />选择 QQ 目录</button>
+                <button className="secondary-button" onClick={onScan}><RefreshCw size={16} />重新扫描</button>
+              </div>
+            </section>
+          ) : (
+            <>
+              <div className="file-kind-tabs">
+                <button className={kind === 'all' ? 'active' : ''} onClick={() => setKind('all')}><HardDrive size={17} />全部 <span>{platformFiles.length}</span></button>
+                {(Object.keys(CHAT_FILE_KIND_META) as ChatFileKind[]).map((key) => {
+                  const meta = CHAT_FILE_KIND_META[key]
+                  const Icon = meta.icon
+                  return <button key={key} className={kind === key ? 'active' : ''} onClick={() => setKind(key)}><Icon size={17} style={{ color: meta.color }} />{meta.label} <span>{kindCounts.get(key) ?? 0}</span></button>
+                })}
+              </div>
+              <section className="content-card chat-file-browser">
+                <div className="file-toolbar">
+                  <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索聊天文件名或位置" /></label>
+                  <select value={account} onChange={(event) => setAccount(event.target.value)}><option value="all">全部账号</option>{availableAccounts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
+                  <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="30">30 天未修改</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
+                  <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
+                  <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
+                </div>
+                <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（可预览时点击打开）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
+                <div className="chat-file-table">
+                  {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
+                    <ChatFileRow
+                      key={file.id}
+                      file={file}
+                      checked={selected.has(file.id)}
+                      onOpen={() => onOpen(file.id)}
+                      onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
+                    />
+                  ))}
+                </div>
+                <div className="pagination"><span>第 {page} / {pageCount} 页</span><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button></div>
+              </section>
+              <div className="sticky-action file-action">
+                <div><span>已选择 {selected.size} 个聊天文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
+                <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
+                <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
+              </div>
+            </>
+          )}
         </>
       )}
     </div>
@@ -907,7 +973,7 @@ function ChatFileRow({
 }): React.JSX.Element {
   const meta = CHAT_FILE_KIND_META[file.kind]
   const Icon = meta.icon
-  const sourceLabel = `${file.platform === 'wechat' ? '微信' : 'QQ'} · ${CHAT_AREA_LABELS[file.area]}`
+  const sourceLabel = `${file.platform === 'wechat' ? '微信' : 'QQ'} · ${CHAT_AREA_LABELS[file.area]}${file.onSystemDrive ? '' : ` · ${file.drive}盘`}`
   return (
     <div
       className={`chat-file-row ${checked ? 'selected' : ''} ${file.previewable ? 'openable' : 'protected-file'}`}
@@ -925,7 +991,7 @@ function ChatFileRow({
     >
       <button className={`checkbox ${checked ? 'checked' : ''}`} aria-label={`选择 ${file.name}`} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
       <div className="file-name"><span style={{ color: meta.color }}><Icon size={19} /></span><div><strong title={file.name}>{file.name}</strong><small title={file.path}>{file.path}</small></div></div>
-      <span className={`chat-source-badge ${file.platform}`} title={file.accountLabel}>{sourceLabel}</span>
+      <span className={`chat-source-badge ${file.platform}`} title={`${file.accountLabel} · ${file.drive}盘`}>{sourceLabel}</span>
       <span>{formatDate(file.modifiedAt)}</span>
       <b>{formatBytes(file.bytes)}</b>
       <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); void window.jingpan.revealChatFile(file.id) }}><FolderOpen size={17} /></button>

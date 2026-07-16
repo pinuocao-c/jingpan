@@ -18,6 +18,7 @@ const api: JingpanApi = {
   openUserFile: (fileId: string) => ipcRenderer.invoke('user-files:open', fileId),
   revealUserFile: (fileId: string) => ipcRenderer.invoke('user-files:reveal', fileId),
   scanChatFiles: () => ipcRenderer.invoke('chat-files:scan'),
+  chooseQqStorageFolder: () => ipcRenderer.invoke('chat-files:choose-qq-folder'),
   cancelChatFileScan: () => ipcRenderer.invoke('chat-files:cancel'),
   recycleChatFiles: (fileIds: string[]) => ipcRenderer.invoke('chat-files:recycle', fileIds),
   openChatFile: (fileId: string) => ipcRenderer.invoke('chat-files:open', fileId),

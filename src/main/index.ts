@@ -1,13 +1,15 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
+import { promises as fs } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron'
 import path from 'node:path'
 import type { CategoryId, TaskProgress } from '../shared/types'
 import { analyzeSystemDrive } from './services/analyzer'
 import { launchUninstaller, scanInstalledApps, type InternalApp } from './services/apps'
 import { CATEGORY_META } from './services/catalog'
 import {
+  resolveQqStorageBase,
   scanChatFiles,
   verifyChatFileSnapshot,
   type InternalChatFile
@@ -44,6 +46,57 @@ const CLEANUP_SESSION_TTL_MS = 30 * 60 * 1000
 const MAX_RECYCLE_BATCH = 2_000
 const UPDATE_CACHE_TTL_MS = 30 * 60 * 1000
 const UPDATE_ERROR_CACHE_TTL_MS = 60 * 1000
+const CHAT_STORAGE_SETTINGS_VERSION = 1
+let storedQqRoots: string[] | null = null
+
+interface ChatStorageSettings {
+  version: number
+  qqRoots: string[]
+}
+
+function chatStorageSettingsPath(): string {
+  return path.join(app.getPath('userData'), 'chat-storage.json')
+}
+
+function normalizeStoredRoot(candidate: string): string | null {
+  if (!candidate || candidate.length > 1_024) return null
+  const resolved = path.resolve(candidate)
+  return /^[a-z]:\\/i.test(resolved) ? resolved : null
+}
+
+async function getStoredQqRoots(): Promise<string[]> {
+  if (storedQqRoots) return storedQqRoots
+  try {
+    const parsed = JSON.parse(await fs.readFile(chatStorageSettingsPath(), 'utf8')) as Partial<ChatStorageSettings>
+    storedQqRoots = Array.isArray(parsed.qqRoots)
+      ? [...new Map(parsed.qqRoots
+        .filter((candidate): candidate is string => typeof candidate === 'string')
+        .map(normalizeStoredRoot)
+        .filter((candidate): candidate is string => Boolean(candidate))
+        .map((candidate) => [candidate.toLocaleLowerCase('en-US'), candidate])).values()]
+      : []
+  } catch {
+    storedQqRoots = []
+  }
+  return storedQqRoots
+}
+
+async function rememberQqRoot(candidate: string): Promise<boolean> {
+  const normalized = normalizeStoredRoot(candidate)
+  if (!normalized) return false
+  const roots = await getStoredQqRoots()
+  if (roots.some((root) => root.toLocaleLowerCase('en-US') === normalized.toLocaleLowerCase('en-US'))) {
+    return false
+  }
+  storedQqRoots = [...roots, normalized]
+  const settings: ChatStorageSettings = {
+    version: CHAT_STORAGE_SETTINGS_VERSION,
+    qqRoots: storedQqRoots
+  }
+  await fs.mkdir(path.dirname(chatStorageSettingsPath()), { recursive: true })
+  await fs.writeFile(chatStorageSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, 'utf8')
+  return true
+}
 
 async function checkForUpdates(force = false): Promise<TrustedUpdate> {
   const cachedAt = cachedUpdate ? new Date(cachedUpdate.checkedAt).getTime() : 0
@@ -365,11 +418,48 @@ function registerIpc(): void {
     chatFileMap.clear()
     const controller = beginTask('chat-files')
     try {
-      const { result, internal } = await scanChatFiles(controller, sendProgress)
+      const { result, internal } = await scanChatFiles(controller, sendProgress, {
+        customQqRoots: await getStoredQqRoots()
+      })
       chatFileMap = internal
       return result
     } finally {
       finishTask(controller)
+    }
+  })
+
+  ipcMain.handle('chat-files:choose-qq-folder', async (event) => {
+    assertTrustedSender(event)
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return { selected: false, recognized: false, added: false, path: null, message: '主窗口暂不可用' }
+    }
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: '选择 QQ 文件数据目录',
+      buttonLabel: '使用此目录',
+      message: '请选择 Tencent Files 文件夹；也可以选择它的上级文件夹或其中的账号文件夹。',
+      properties: ['openDirectory', 'dontAddToRecent']
+    })
+    if (selection.canceled || selection.filePaths.length !== 1) {
+      return { selected: false, recognized: false, added: false, path: null, message: '' }
+    }
+    const selectedPath = selection.filePaths[0]
+    const resolvedBase = await resolveQqStorageBase(selectedPath)
+    if (!resolvedBase) {
+      return {
+        selected: true,
+        recognized: false,
+        added: false,
+        path: selectedPath,
+        message: '该目录中没有识别到 QQ 的 FileRecv、Image 或 NTQQ 的 nt_data 文件夹，请选择 Tencent Files 数据目录'
+      }
+    }
+    const added = await rememberQqRoot(resolvedBase)
+    return {
+      selected: true,
+      recognized: true,
+      added,
+      path: resolvedBase,
+      message: added ? '已添加 QQ 文件目录，将立即重新扫描' : 'QQ 文件目录已存在，将立即重新扫描'
     }
   })
 

@@ -143,6 +143,7 @@ export interface UserFileOpenResult {
 }
 
 export type ChatPlatform = 'wechat' | 'qq'
+export type ChatStorageSource = 'automatic' | 'custom'
 
 export type ChatFileKind =
   | 'image'
@@ -188,11 +189,30 @@ export interface ChatFileItem {
   bytes: number
   modifiedAt: string
   previewable: boolean
+  drive: string
+  onSystemDrive: boolean
+}
+
+export interface ChatStorageLocation {
+  platform: ChatPlatform
+  path: string
+  drive: string
+  onSystemDrive: boolean
+  source: ChatStorageSource
+}
+
+export interface ChatStorageFolderResult {
+  selected: boolean
+  recognized: boolean
+  added: boolean
+  path: string | null
+  message: string
 }
 
 export interface ChatFileScanResult {
   files: ChatFileItem[]
   accounts: ChatAccountSummary[]
+  locations: ChatStorageLocation[]
   scannedAt: string
   durationMs: number
   cancelled: boolean
@@ -260,6 +280,7 @@ export interface JingpanApi {
   openUserFile: (fileId: string) => Promise<UserFileOpenResult>
   revealUserFile: (fileId: string) => Promise<boolean>
   scanChatFiles: () => Promise<ChatFileScanResult>
+  chooseQqStorageFolder: () => Promise<ChatStorageFolderResult>
   cancelChatFileScan: () => Promise<void>
   recycleChatFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
   openChatFile: (fileId: string) => Promise<UserFileOpenResult>

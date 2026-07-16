@@ -8,12 +8,38 @@ import type {
   ChatFileKind,
   ChatFileScanResult,
   ChatPlatform,
+  ChatStorageLocation,
+  ChatStorageSource,
   TaskProgress
 } from '../../shared/types'
 import { isPathInsideOrEqual, type TaskController } from './filesystem'
+import { runPowerShellJson } from './powershell'
 import { getSystemDrive } from './system'
 
 const MAX_RESULTS = 30_000
+const MAX_DISCOVERY_DIRECTORIES = 12_000
+const MAX_DISCOVERY_DEPTH = 3
+const QQ_STORAGE_DIRECTORY = 'Tencent Files'
+const DISCOVERY_SKIPPED_DIRECTORIES = new Set([
+  '$recycle.bin',
+  'system volume information',
+  'windows',
+  'program files',
+  'program files (x86)',
+  'programdata',
+  'windowsapps',
+  'recovery',
+  'users',
+  'node_modules',
+  '.git'
+])
+
+const FIXED_DRIVE_SCRIPT = String.raw`
+$drives = [System.IO.DriveInfo]::GetDrives() |
+  Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady } |
+  ForEach-Object { [PSCustomObject]@{ Root = $_.RootDirectory.FullName } }
+ConvertTo-Json -InputObject @($drives) -Compress -Depth 2
+`
 
 const EXTENSION_KIND = new Map<string, ChatFileKind>([
   ['.jpg', 'image'], ['.jpeg', 'image'], ['.png', 'image'], ['.gif', 'image'],
@@ -48,6 +74,28 @@ interface ChatScanRoot {
   accountId: string
   accountLabel: string
   area: ChatFileArea
+  storagePath: string
+  storageSource: ChatStorageSource
+}
+
+interface FixedDriveRecord {
+  Root?: string
+}
+
+interface QqBaseCandidate {
+  path: string
+  source: ChatStorageSource
+}
+
+interface ChatRootDiscovery {
+  roots: ChatScanRoot[]
+  locations: ChatStorageLocation[]
+}
+
+export interface ChatFileScanOptions {
+  documentRoots?: string[]
+  customQqRoots?: string[]
+  qqSearchRoots?: string[]
 }
 
 export interface InternalChatFile extends ChatFileItem {
@@ -87,6 +135,14 @@ function isOnSystemDrive(candidate: string): boolean {
     === systemRoot.toLocaleLowerCase('en-US')
 }
 
+function isLocalDrivePath(candidate: string): boolean {
+  return /^[a-z]:\\/i.test(path.resolve(candidate))
+}
+
+function getDrive(candidate: string): string {
+  return path.parse(path.resolve(candidate)).root.replace(/[:\\/]+$/, '').toUpperCase()
+}
+
 function maskAccountName(platform: ChatPlatform, name: string): string {
   const cleaned = name.trim()
   const suffix = cleaned.length > 6 ? `…${cleaned.slice(-6)}` : cleaned
@@ -104,6 +160,96 @@ function publicFile(file: InternalChatFile): ChatFileItem {
     ...visible
   } = file
   return visible
+}
+
+function addQqBaseCandidate(
+  candidates: Map<string, QqBaseCandidate>,
+  candidate: string,
+  source: ChatStorageSource
+): void {
+  if (!candidate || !isLocalDrivePath(candidate)) return
+  const resolved = path.resolve(candidate)
+  const key = normalizePath(resolved)
+  const current = candidates.get(key)
+  if (!current || source === 'custom') candidates.set(key, { path: resolved, source })
+}
+
+async function getFixedDriveRoots(): Promise<string[]> {
+  try {
+    const records = await runPowerShellJson<FixedDriveRecord[]>(FIXED_DRIVE_SCRIPT)
+    return records
+      .map((record) => record.Root?.trim() ?? '')
+      .filter((root) => /^[a-z]:\\$/i.test(root) && existsSync(root))
+  } catch {
+    return [`${getSystemDrive()}\\`]
+  }
+}
+
+async function discoverQqBases(searchRoots: string[]): Promise<string[]> {
+  const found = new Map<string, string>()
+  const queue = searchRoots
+    .filter((root) => isLocalDrivePath(root) && existsSync(root))
+    .map((root) => ({ directory: path.resolve(root), depth: 0 }))
+  const visited = new Set<string>()
+  let visitedDirectories = 0
+
+  while (queue.length > 0 && visitedDirectories < MAX_DISCOVERY_DIRECTORIES) {
+    const current = queue.shift()!
+    let realDirectory: string
+    try {
+      realDirectory = await fs.realpath(current.directory)
+    } catch {
+      continue
+    }
+    const normalized = normalizePath(realDirectory)
+    if (visited.has(normalized)) continue
+    visited.add(normalized)
+    visitedDirectories += 1
+
+    let entries
+    try {
+      entries = await fs.readdir(current.directory, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue
+      const candidate = path.join(current.directory, entry.name)
+      if (entry.name.toLocaleLowerCase('en-US') === QQ_STORAGE_DIRECTORY.toLocaleLowerCase('en-US')) {
+        try {
+          const realCandidate = await fs.realpath(candidate)
+          if (isLocalDrivePath(realCandidate)) found.set(normalizePath(realCandidate), realCandidate)
+        } catch {
+          // Unavailable QQ directories are ignored.
+        }
+        continue
+      }
+      if (
+        current.depth < MAX_DISCOVERY_DEPTH
+        && !DISCOVERY_SKIPPED_DIRECTORIES.has(entry.name.toLocaleLowerCase('en-US'))
+      ) {
+        queue.push({ directory: candidate, depth: current.depth + 1 })
+      }
+    }
+  }
+  return [...found.values()]
+}
+
+function qqBaseCandidatesFromSelection(candidate: string): string[] {
+  const resolved = path.resolve(candidate)
+  const candidates = new Set<string>()
+  let current = resolved
+  while (true) {
+    if (path.basename(current).toLocaleLowerCase('en-US') === QQ_STORAGE_DIRECTORY.toLocaleLowerCase('en-US')) {
+      candidates.add(current)
+      break
+    }
+    const parent = path.dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  candidates.add(path.join(resolved, QQ_STORAGE_DIRECTORY))
+  return [...candidates]
 }
 
 export function classifyChatFile(
@@ -219,7 +365,10 @@ async function addAreaRoot(
   accountRoot: string,
   accountName: string,
   relativePath: string,
-  area: ChatFileArea
+  area: ChatFileArea,
+  storagePath: string,
+  storageSource: ChatStorageSource,
+  allowOtherDrive = false
 ): Promise<void> {
   const lexicalRoot = path.resolve(accountRoot, relativePath)
   if (!existsSync(lexicalRoot)) return
@@ -229,7 +378,8 @@ async function addAreaRoot(
     const stat = await fs.stat(realRoot)
     if (
       !stat.isDirectory()
-      || !isOnSystemDrive(realRoot)
+      || !isLocalDrivePath(realRoot)
+      || (!allowOtherDrive && !isOnSystemDrive(realRoot))
       || !isPathInsideOrEqual(realAccountRoot, realRoot)
     ) return
     const key = normalizePath(realRoot)
@@ -241,7 +391,9 @@ async function addAreaRoot(
       platform,
       accountId: accountId(platform, realAccountRoot),
       accountLabel: maskAccountName(platform, accountName),
-      area
+      area,
+      storagePath,
+      storageSource
     })
   } catch {
     // Unavailable, redirected or linked chat directories are omitted.
@@ -301,19 +453,37 @@ async function discoverWeChatRoots(documentRoots: string[]): Promise<ChatScanRoo
         ['temp', 'temporary']
       ]
       for (const [relativePath, area] of [...classicAreas, ...modernAreas]) {
-        await addAreaRoot(roots, seen, 'wechat', accountRoot, account.name, relativePath, area)
+        await addAreaRoot(
+          roots,
+          seen,
+          'wechat',
+          accountRoot,
+          account.name,
+          relativePath,
+          area,
+          base,
+          'automatic'
+        )
       }
     }
   }
   return roots
 }
 
-async function discoverQqRoots(documentRoots: string[]): Promise<ChatScanRoot[]> {
+async function discoverQqRoots(
+  documentRoots: string[],
+  extraBases: QqBaseCandidate[]
+): Promise<ChatScanRoot[]> {
   const roots: ChatScanRoot[] = []
   const seen = new Set<string>()
+  const bases = new Map<string, QqBaseCandidate>()
   for (const documents of documentRoots) {
-    const base = path.join(documents, 'Tencent Files')
-    if (!existsSync(base) || !isOnSystemDrive(base)) continue
+    addQqBaseCandidate(bases, path.join(documents, QQ_STORAGE_DIRECTORY), 'automatic')
+  }
+  for (const candidate of extraBases) addQqBaseCandidate(bases, candidate.path, candidate.source)
+
+  for (const { path: base, source } of bases.values()) {
+    if (!existsSync(base) || !isLocalDrivePath(base)) continue
     let accounts
     let realBase: string
     try {
@@ -323,7 +493,11 @@ async function discoverQqRoots(documentRoots: string[]): Promise<ChatScanRoot[]>
       continue
     }
     for (const account of accounts) {
-      if (!account.isDirectory() || account.isSymbolicLink() || /^All Users$/i.test(account.name)) continue
+      if (
+        !account.isDirectory()
+        || account.isSymbolicLink()
+        || /^(All Users|nt_qq)$/i.test(account.name)
+      ) continue
       const accountRoot = path.join(base, account.name)
       try {
         const realAccountRoot = await fs.realpath(accountRoot)
@@ -343,11 +517,37 @@ async function discoverQqRoots(documentRoots: string[]): Promise<ChatScanRoot[]>
         [path.join('nt_qq', 'nt_data', 'Audio'), 'audio']
       ]
       for (const [relativePath, area] of areas) {
-        await addAreaRoot(roots, seen, 'qq', accountRoot, account.name, relativePath, area)
+        await addAreaRoot(
+          roots,
+          seen,
+          'qq',
+          accountRoot,
+          account.name,
+          relativePath,
+          area,
+          base,
+          source,
+          true
+        )
       }
     }
   }
   return roots
+}
+
+export async function resolveQqStorageBase(candidate: string): Promise<string | null> {
+  if (!candidate || candidate.length > 1_024 || !isLocalDrivePath(candidate)) return null
+  for (const base of qqBaseCandidatesFromSelection(candidate)) {
+    const roots = await discoverQqRoots([], [{ path: base, source: 'custom' }])
+    if (roots.length > 0) {
+      try {
+        return await fs.realpath(base)
+      } catch {
+        return path.resolve(base)
+      }
+    }
+  }
+  return null
 }
 
 function getDocumentRoots(): string[] {
@@ -364,22 +564,52 @@ function getDocumentRoots(): string[] {
   return [...roots].filter((root) => existsSync(root))
 }
 
-async function getChatRoots(documentRootsOverride?: string[]): Promise<ChatScanRoot[]> {
-  const documentRoots = documentRootsOverride ?? getDocumentRoots()
+async function getChatRoots(options: ChatFileScanOptions): Promise<ChatRootDiscovery> {
+  const documentRoots = options.documentRoots ?? getDocumentRoots()
+  const searchRoots = options.qqSearchRoots
+    ?? (options.documentRoots === undefined ? await getFixedDriveRoots() : [])
+  const discoveredQqBases = await discoverQqBases(searchRoots)
+  const qqBases: QqBaseCandidate[] = [
+    ...discoveredQqBases.map((candidate) => ({ path: candidate, source: 'automatic' as const })),
+    ...(options.customQqRoots ?? []).map((candidate) => ({ path: candidate, source: 'custom' as const }))
+  ]
   const [wechat, qq] = await Promise.all([
     discoverWeChatRoots(documentRoots),
-    discoverQqRoots(documentRoots)
+    discoverQqRoots(documentRoots, qqBases)
   ])
-  return [...wechat, ...qq]
+  const roots = [...wechat, ...qq]
+  const locationMap = new Map<string, ChatStorageLocation>()
+  for (const root of roots) {
+    const storagePath = path.resolve(root.storagePath)
+    const key = `${root.platform}:${normalizePath(storagePath)}`
+    const current = locationMap.get(key)
+    const source = current?.source === 'custom' || root.storageSource === 'custom'
+      ? 'custom'
+      : 'automatic'
+    locationMap.set(key, {
+      platform: root.platform,
+      path: storagePath,
+      drive: getDrive(storagePath),
+      onSystemDrive: isOnSystemDrive(storagePath),
+      source
+    })
+  }
+  return {
+    roots,
+    locations: [...locationMap.values()].sort((left, right) => (
+      left.platform.localeCompare(right.platform)
+      || left.path.localeCompare(right.path, 'zh-CN')
+    ))
+  }
 }
 
 export async function scanChatFiles(
   controller: TaskController,
   onProgress: (progress: TaskProgress) => void,
-  options: { documentRoots?: string[] } = {}
+  options: ChatFileScanOptions = {}
 ): Promise<ChatFileSnapshot> {
   const startedAt = Date.now()
-  const roots = await getChatRoots(options.documentRoots)
+  const { roots, locations } = await getChatRoots(options)
   const largestFiles: InternalChatFile[] = []
   const seenRealPaths = new Set<string>()
   let visited = 0
@@ -440,6 +670,8 @@ export async function scanChatFiles(
               bytes: stat.size,
               modifiedAt: stat.mtime.toISOString(),
               previewable: classification.previewable,
+              drive: getDrive(realCandidate),
+              onSystemDrive: isOnSystemDrive(realCandidate),
               realPath: realCandidate,
               approvedLexicalRoot: root.lexicalRoot,
               approvedRealRoot: root.realRoot,
@@ -488,7 +720,7 @@ export async function scanChatFiles(
     percent: 100,
     title: '聊天文件整理完成',
     detail: roots.length === 0
-      ? '未在 C 盘识别到微信或 QQ 聊天文件目录'
+      ? '未识别到微信或 QQ 聊天文件目录，可手动选择 QQ 数据位置'
       : truncated
         ? `共找到 ${totalMatched.toLocaleString('zh-CN')} 项，已显示最大的 ${MAX_RESULTS.toLocaleString('zh-CN')} 项`
         : `共找到 ${files.length.toLocaleString('zh-CN')} 个文件`
@@ -498,6 +730,7 @@ export async function scanChatFiles(
     result: {
       files,
       accounts,
+      locations,
       scannedAt: new Date().toISOString(),
       durationMs: Date.now() - startedAt,
       cancelled: controller.cancelled,

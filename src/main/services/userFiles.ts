@@ -9,6 +9,7 @@ import type {
   UserFileScanResult
 } from '../../shared/types'
 import { isPathInsideOrEqual, type TaskController } from './filesystem'
+import { getKnownFolderPaths } from './knownFolders'
 import { getSystemDrive } from './system'
 
 const MAX_RESULTS = 20_000
@@ -19,6 +20,8 @@ const EXTENSION_KIND = new Map<string, UserFileKind>([
   ['.heic', 'image'], ['.svg', 'image'],
   ['.mp4', 'video'], ['.mov', 'video'], ['.avi', 'video'], ['.mkv', 'video'],
   ['.wmv', 'video'], ['.flv', 'video'], ['.webm', 'video'], ['.m4v', 'video'], ['.3gp', 'video'],
+  ['.mp3', 'audio'], ['.wav', 'audio'], ['.m4a', 'audio'], ['.flac', 'audio'],
+  ['.aac', 'audio'], ['.ogg', 'audio'], ['.oga', 'audio'], ['.wma', 'audio'], ['.opus', 'audio'],
   ['.txt', 'text'], ['.text', 'text'], ['.md', 'text'], ['.markdown', 'text'],
   ['.log', 'text'], ['.nfo', 'text'],
   ['.doc', 'word'], ['.docx', 'word'], ['.rtf', 'word'], ['.odt', 'word'],
@@ -32,10 +35,11 @@ const EXTENSION_KIND = new Map<string, UserFileKind>([
   ['.appx', 'installer'], ['.appxbundle', 'installer'], ['.appinstaller', 'installer'], ['.iso', 'installer']
 ])
 
-interface PersonalRoot {
+export interface PersonalRoot {
   lexicalRoot: string
   realRoot: string
   location: UserFileLocation
+  cloudBacked: boolean
 }
 
 export interface InternalUserFile extends UserFileItem {
@@ -66,14 +70,26 @@ function isOnSystemDrive(candidate: string): boolean {
     === systemRoot.toLocaleLowerCase('en-US')
 }
 
-async function getPersonalRoots(): Promise<PersonalRoot[]> {
-  const profile = process.env.USERPROFILE ?? ''
+function isCloudBacked(candidate: string, cloudRoots: string[]): boolean {
+  return cloudRoots.some((root) => isPathInsideOrEqual(root, candidate))
+}
+
+export async function getPersonalRoots(): Promise<PersonalRoot[]> {
+  const profile = process.env.USERPROFILE
+  const known = await getKnownFolderPaths()
   const candidates: Array<{ root: string | undefined; location: UserFileLocation }> = [
-    { root: path.join(profile, 'Desktop'), location: 'desktop' },
-    { root: path.join(profile, 'Downloads'), location: 'downloads' },
-    { root: path.join(profile, 'Documents'), location: 'documents' },
-    { root: path.join(profile, 'Pictures'), location: 'pictures' },
-    { root: path.join(profile, 'Videos'), location: 'videos' },
+    { root: known.desktop, location: 'desktop' },
+    { root: known.downloads, location: 'downloads' },
+    { root: known.documents, location: 'documents' },
+    { root: known.pictures, location: 'pictures' },
+    { root: known.videos, location: 'videos' },
+    { root: known.music, location: 'music' },
+    { root: profile ? path.join(profile, 'Desktop') : undefined, location: 'desktop' },
+    { root: profile ? path.join(profile, 'Downloads') : undefined, location: 'downloads' },
+    { root: profile ? path.join(profile, 'Documents') : undefined, location: 'documents' },
+    { root: profile ? path.join(profile, 'Pictures') : undefined, location: 'pictures' },
+    { root: profile ? path.join(profile, 'Videos') : undefined, location: 'videos' },
+    { root: profile ? path.join(profile, 'Music') : undefined, location: 'music' },
     { root: process.env.OneDrive, location: 'onedrive' },
     { root: process.env.OneDriveConsumer, location: 'onedrive' },
     { root: process.env.OneDriveCommercial, location: 'onedrive' }
@@ -81,6 +97,15 @@ async function getPersonalRoots(): Promise<PersonalRoot[]> {
 
   const uniqueRealRoots = new Set<string>()
   const roots: PersonalRoot[] = []
+  const cloudRoots: string[] = []
+  for (const candidate of [process.env.OneDrive, process.env.OneDriveConsumer, process.env.OneDriveCommercial]) {
+    if (!candidate || !existsSync(candidate)) continue
+    try {
+      cloudRoots.push(await fs.realpath(candidate))
+    } catch {
+      // Unavailable cloud roots are ignored.
+    }
+  }
   for (const candidate of candidates) {
     if (!candidate.root || !existsSync(candidate.root)) continue
     try {
@@ -91,7 +116,12 @@ async function getPersonalRoots(): Promise<PersonalRoot[]> {
       const normalized = normalizePath(realRoot)
       if (uniqueRealRoots.has(normalized)) continue
       uniqueRealRoots.add(normalized)
-      roots.push({ lexicalRoot, realRoot, location: candidate.location })
+      roots.push({
+        lexicalRoot,
+        realRoot,
+        location: candidate.location,
+        cloudBacked: candidate.location === 'onedrive' || isCloudBacked(realRoot, cloudRoots)
+      })
     } catch {
       // Redirected or unavailable known folders are safely omitted.
     }

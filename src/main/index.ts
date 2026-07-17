@@ -15,6 +15,12 @@ import {
   type InternalChatFile
 } from './services/chatFiles'
 import { cleanCategories } from './services/cleaner'
+import {
+  getDuplicateGroupSurvivors,
+  scanDuplicateFiles,
+  verifyDuplicateFileSnapshot,
+  type InternalDuplicateFile
+} from './services/duplicates'
 import type { TaskController } from './services/filesystem'
 import { scanCleanupCategories } from './services/scanner'
 import { getDiskSummary, getSystemDrive, isRunningAsAdministrator } from './services/system'
@@ -27,11 +33,12 @@ import { fetchLatestUpdate, type TrustedUpdate } from './services/updates'
 
 let mainWindow: BrowserWindow | null = null
 let activeTask: {
-  kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'chat-files' | 'apps'
+  kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'duplicate-files' | 'chat-files' | 'apps'
   controller: TaskController
 } | null = null
 let revealedPaths = new Set<string>()
 let userFileMap = new Map<string, InternalUserFile>()
+let duplicateFileMap = new Map<string, InternalDuplicateFile>()
 let chatFileMap = new Map<string, InternalChatFile>()
 let installedAppMap = new Map<string, InternalApp>()
 let cachedUpdate: TrustedUpdate | null = null
@@ -197,7 +204,7 @@ function sendProgress(progress: TaskProgress): void {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('task:progress', progress)
 }
 
-function beginTask(kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'chat-files' | 'apps'): TaskController {
+function beginTask(kind: 'scan' | 'clean' | 'analyze' | 'user-files' | 'duplicate-files' | 'chat-files' | 'apps'): TaskController {
   if (activeTask) throw new Error(`已有${activeTask.kind}任务正在运行`)
   const controller = { cancelled: false }
   activeTask = { kind, controller }
@@ -305,6 +312,21 @@ function registerIpc(): void {
     await shell.openExternal('ms-settings:storagesense')
   })
 
+  ipcMain.handle('settings:storage-recommendations', async (event) => {
+    assertTrustedSender(event)
+    await shell.openExternal('ms-settings:storagerecommendations')
+  })
+
+  ipcMain.handle('settings:storage-sense', async (event) => {
+    assertTrustedSender(event)
+    await shell.openExternal('ms-settings:storagepolicies')
+  })
+
+  ipcMain.handle('settings:save-locations', async (event) => {
+    assertTrustedSender(event)
+    await shell.openExternal('ms-settings:savelocations')
+  })
+
   ipcMain.handle('settings:disk-cleanup', async (event) => {
     assertTrustedSender(event)
     const driveLetter = getSystemDrive().replace(':', '')
@@ -408,6 +430,98 @@ function registerIpc(): void {
     assertTrustedSender(event)
     if (typeof fileId !== 'string') return false
     const file = userFileMap.get(fileId)
+    if (!file) return false
+    shell.showItemInFolder(file.path)
+    return true
+  })
+
+  ipcMain.handle('duplicate-files:scan', async (event) => {
+    assertTrustedSender(event)
+    duplicateFileMap.clear()
+    const controller = beginTask('duplicate-files')
+    try {
+      const { result, internal } = await scanDuplicateFiles(controller, sendProgress)
+      duplicateFileMap = internal
+      return result
+    } finally {
+      finishTask(controller)
+    }
+  })
+
+  ipcMain.handle('duplicate-files:cancel', (event) => {
+    assertTrustedSender(event)
+    if (activeTask?.kind === 'duplicate-files') activeTask.controller.cancelled = true
+  })
+
+  ipcMain.handle('duplicate-files:recycle', async (event, fileIds: unknown) => {
+    assertTrustedSender(event)
+    if (!Array.isArray(fileIds) || !fileIds.every((id) => typeof id === 'string')) {
+      throw new Error('无效的重复文件选择')
+    }
+    const uniqueIds = [...new Set(fileIds)]
+    if (uniqueIds.length === 0 || uniqueIds.length > MAX_RECYCLE_BATCH) {
+      throw new Error(`每次最多处理 ${MAX_RECYCLE_BATCH.toLocaleString('zh-CN')} 个文件`)
+    }
+    const selected = new Set(uniqueIds)
+    for (const id of uniqueIds) {
+      const file = duplicateFileMap.get(id)
+      if (!file) throw new Error('重复文件列表已过期，请重新扫描')
+    }
+
+    for (const survivor of getDuplicateGroupSurvivors(duplicateFileMap.values(), selected)) {
+      if (!(await verifyDuplicateFileSnapshot(survivor))) {
+        throw new Error('准备保留的文件已发生变化，请重新扫描后再操作')
+      }
+    }
+
+    let movedToRecycleBin = 0
+    let failed = 0
+    const movedIds: string[] = []
+    const failedIds: string[] = []
+    const errors: string[] = []
+    for (const id of uniqueIds) {
+      const file = duplicateFileMap.get(id)!
+      try {
+        if (!(await verifyDuplicateFileSnapshot(file))) {
+          failed += 1
+          failedIds.push(id)
+          if (errors.length < 10) errors.push(`${file.name} 已发生变化，请重新扫描后再操作`)
+          continue
+        }
+        await shell.trashItem(file.path)
+        duplicateFileMap.delete(id)
+        movedToRecycleBin += 1
+        movedIds.push(id)
+      } catch (error) {
+        failed += 1
+        failedIds.push(id)
+        if (errors.length < 10) errors.push(error instanceof Error ? error.message : String(error))
+      }
+    }
+    return { movedToRecycleBin, failed, movedIds, failedIds, errors }
+  })
+
+  ipcMain.handle('duplicate-files:open', async (event, fileId: unknown) => {
+    assertTrustedSender(event)
+    if (typeof fileId !== 'string') return { opened: false, message: '无效的文件选择' }
+    const file = duplicateFileMap.get(fileId)
+    if (!file) return { opened: false, message: '重复文件列表已过期，请重新扫描' }
+    if (file.kind === 'installer') {
+      return { opened: false, message: '为避免误运行安装程序，安装包不支持直接打开；可查看所在位置' }
+    }
+    if (!(await verifyDuplicateFileSnapshot(file))) {
+      return { opened: false, message: '文件已发生变化，请重新扫描后再打开' }
+    }
+    const error = await shell.openPath(file.path)
+    return error
+      ? { opened: false, message: `无法打开文件：${error}` }
+      : { opened: true, message: '' }
+  })
+
+  ipcMain.handle('duplicate-files:reveal', (event, fileId: unknown) => {
+    assertTrustedSender(event)
+    if (typeof fileId !== 'string') return false
+    const file = duplicateFileMap.get(fileId)
     if (!file) return false
     shell.showItemInFolder(file.path)
     return true

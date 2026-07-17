@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleHelp,
+  CopyCheck,
   Download,
   ExternalLink,
   FileAudio,
@@ -47,6 +48,7 @@ import type {
   ChatFileScanResult,
   ChatPlatform,
   CleanupResult,
+  DuplicateFileScanResult,
   InstalledApp,
   InstalledAppScanResult,
   ScanResult,
@@ -60,11 +62,12 @@ import type {
 } from '../../shared/types'
 import { formatBytes, formatDate, formatDuration } from './format'
 
-type Page = 'overview' | 'cleanup' | 'analysis' | 'chat' | 'files' | 'apps' | 'settings'
-type BusyTask = 'scan' | 'clean' | 'analysis' | 'files' | 'chat' | 'apps' | null
+type Page = 'overview' | 'cleanup' | 'analysis' | 'duplicates' | 'chat' | 'files' | 'apps' | 'settings'
+type BusyTask = 'scan' | 'clean' | 'analysis' | 'duplicates' | 'files' | 'chat' | 'apps' | null
 type Dialog =
   | { type: 'cleanup'; ids: CategoryId[]; bytes: number }
   | { type: 'recycle'; ids: string[]; bytes: number }
+  | { type: 'duplicate-recycle'; ids: string[]; bytes: number }
   | { type: 'chat-recycle'; ids: string[]; bytes: number }
   | { type: 'uninstall'; app: InstalledApp }
   | null
@@ -72,6 +75,7 @@ type Dialog =
 const FILE_KIND_META: Record<UserFileKind, { label: string; icon: typeof FileImage; color: string }> = {
   image: { label: '图片', icon: FileImage, color: '#ec6f8c' },
   video: { label: '视频', icon: FileVideo, color: '#7856ff' },
+  audio: { label: '音频', icon: FileAudio, color: '#2d9b8f' },
   text: { label: '文本', icon: NotepadText, color: '#64748b' },
   word: { label: 'Word', icon: FileText, color: '#3978dc' },
   powerpoint: { label: 'PPT', icon: Presentation, color: '#e66b3d' },
@@ -110,6 +114,7 @@ const navItems: Array<{ id: Page; label: string; description: string; icon: type
   { id: 'overview', label: '空间概览', description: '查看 C 盘容量和建议操作', icon: LayoutDashboard },
   { id: 'cleanup', label: '安全清理', description: '扫描并清理白名单缓存', icon: Sparkles },
   { id: 'analysis', label: '空间分析', description: '了解系统与文件空间占用', icon: BarChart3 },
+  { id: 'duplicates', label: '重复文件', description: '核对并回收完全相同的副本', icon: CopyCheck },
   { id: 'chat', label: '聊天文件', description: '整理微信与 QQ 本地文件', icon: MessageCircle },
   { id: 'files', label: '个人文件', description: '筛选、预览并整理个人文件', icon: FileText },
   { id: 'apps', label: '应用管理', description: '查找闲置软件并安全卸载', icon: AppWindow },
@@ -121,6 +126,7 @@ function App(): React.JSX.Element {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null)
   const [scan, setScan] = useState<ScanResult | null>(null)
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
+  const [duplicateFiles, setDuplicateFiles] = useState<DuplicateFileScanResult | null>(null)
   const [chatFiles, setChatFiles] = useState<ChatFileScanResult | null>(null)
   const [userFiles, setUserFiles] = useState<UserFileScanResult | null>(null)
   const [installedApps, setInstalledApps] = useState<InstalledAppScanResult | null>(null)
@@ -128,6 +134,7 @@ function App(): React.JSX.Element {
   const [progress, setProgress] = useState<TaskProgress | null>(null)
   const [selectedCategories, setSelectedCategories] = useState<Set<CategoryId>>(new Set())
   const [selectedChatFiles, setSelectedChatFiles] = useState<Set<string>>(new Set())
+  const [selectedDuplicateFiles, setSelectedDuplicateFiles] = useState<Set<string>>(new Set())
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [dialog, setDialog] = useState<Dialog>(null)
   const [toast, setToast] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null)
@@ -136,6 +143,7 @@ function App(): React.JSX.Element {
   const [updateChecking, setUpdateChecking] = useState(false)
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
   const openingFiles = useRef(new Set<string>())
+  const openingDuplicateFiles = useRef(new Set<string>())
   const openingChatFiles = useRef(new Set<string>())
   const checkingUpdate = useRef(false)
 
@@ -236,6 +244,20 @@ function App(): React.JSX.Element {
       setAnalysis(await window.jingpan.startAnalysis())
     } catch (error) {
       setToast({ tone: 'warning', text: error instanceof Error ? error.message : '空间分析未能完成' })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const runDuplicateFileScan = async (): Promise<void> => {
+    if (busy) return
+    setBusy('duplicates')
+    setSelectedDuplicateFiles(new Set())
+    setProgress({ kind: 'analyze', percent: 0, title: '准备核对重复文件', detail: '只处理 C 盘个人目录中 1 MB 以上的本地文件' })
+    try {
+      setDuplicateFiles(await window.jingpan.scanDuplicateFiles())
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '重复文件扫描未能完成' })
     } finally {
       setBusy(null)
     }
@@ -385,6 +407,40 @@ function App(): React.JSX.Element {
     }
   }
 
+  const confirmDuplicateRecycle = async (): Promise<void> => {
+    if (!dialog || dialog.type !== 'duplicate-recycle' || !duplicateFiles) return
+    const ids = dialog.ids
+    setDialog(null)
+    try {
+      const result = await window.jingpan.recycleDuplicateFiles(ids)
+      const { movedToRecycleBin, failed, movedIds } = result
+      const removed = new Set(movedIds)
+      const groups = duplicateFiles.groups
+        .map((group) => {
+          const files = group.files.filter((file) => !removed.has(file.id))
+          return {
+            ...group,
+            files,
+            reclaimableBytes: Math.max(0, group.bytesPerFile * (files.length - 1))
+          }
+        })
+        .filter((group) => group.files.length > 1)
+      setDuplicateFiles({
+        ...duplicateFiles,
+        groups,
+        duplicateFiles: groups.reduce((sum, group) => sum + group.files.length, 0),
+        reclaimableBytes: groups.reduce((sum, group) => sum + group.reclaimableBytes, 0)
+      })
+      setSelectedDuplicateFiles(new Set(ids.filter((id) => !removed.has(id))))
+      setToast({
+        tone: failed > 0 ? 'warning' : 'success',
+        text: `${movedToRecycleBin} 个重复副本已移入回收站${failed ? `，${failed} 个文件已变化或处理失败` : ''}`
+      })
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '重复文件未能移入回收站' })
+    }
+  }
+
   const confirmUninstall = async (): Promise<void> => {
     if (!dialog || dialog.type !== 'uninstall') return
     const app = dialog.app
@@ -423,10 +479,24 @@ function App(): React.JSX.Element {
     }
   }
 
+  const openDuplicateFile = async (fileId: string): Promise<void> => {
+    if (openingDuplicateFiles.current.has(fileId)) return
+    openingDuplicateFiles.current.add(fileId)
+    try {
+      const result = await window.jingpan.openDuplicateFile(fileId)
+      if (!result.opened) setToast({ tone: 'warning', text: result.message })
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '无法打开重复文件' })
+    } finally {
+      openingDuplicateFiles.current.delete(fileId)
+    }
+  }
+
   const cancelBusy = (): void => {
     if (busy === 'scan') void window.jingpan.cancelScan()
     if (busy === 'clean') void window.jingpan.cancelCleanup()
     if (busy === 'analysis') void window.jingpan.cancelAnalysis()
+    if (busy === 'duplicates') void window.jingpan.cancelDuplicateFileScan()
     if (busy === 'files') void window.jingpan.cancelUserFileScan()
     if (busy === 'chat') void window.jingpan.cancelChatFileScan()
   }
@@ -455,6 +525,18 @@ function App(): React.JSX.Element {
         )
       case 'analysis':
         return <AnalysisPage analysis={analysis} busy={busy} onAnalyze={runAnalysis} />
+      case 'duplicates':
+        return (
+          <DuplicateFilesPage
+            result={duplicateFiles}
+            busy={busy}
+            selected={selectedDuplicateFiles}
+            onScan={runDuplicateFileScan}
+            onSelectedChange={setSelectedDuplicateFiles}
+            onOpen={openDuplicateFile}
+            onRecycle={(ids, bytes) => setDialog({ type: 'duplicate-recycle', ids, bytes })}
+          />
+        )
       case 'chat':
         return (
           <ChatFilesPage
@@ -544,6 +626,8 @@ function App(): React.JSX.Element {
               ? confirmCleanup
               : dialog.type === 'recycle'
                 ? confirmRecycle
+                : dialog.type === 'duplicate-recycle'
+                  ? confirmDuplicateRecycle
                 : dialog.type === 'chat-recycle'
                   ? confirmChatRecycle
                   : confirmUninstall
@@ -639,6 +723,7 @@ function OverviewPage({
           <button onClick={() => onNavigate('cleanup')}><div className="action-icon green"><Sparkles /></div><div><strong>清理临时文件与缓存</strong><span>{scan ? `预计可释放 ${formatBytes(scan.totalBytes)}` : '扫描后给出准确结果'}</span></div><ChevronRight /></button>
           <button onClick={() => onNavigate('chat')}><div className="action-icon blue"><MessageCircle /></div><div><strong>整理微信与 QQ 聊天文件</strong><span>按账号和类型筛选，预览后再移入回收站</span></div><ChevronRight /></button>
           <button onClick={() => onNavigate('files')}><div className="action-icon purple"><FileText /></div><div><strong>整理图片、视频与文档</strong><span>逐项选择，删除后仍可从回收站恢复</span></div><ChevronRight /></button>
+          <button onClick={() => onNavigate('duplicates')}><div className="action-icon blue"><CopyCheck /></div><div><strong>找出内容完全相同的副本</strong><span>完整 SHA-256 核对，至少保留一份再移入回收站</span></div><ChevronRight /></button>
           <button onClick={() => onNavigate('apps')}><div className="action-icon orange"><AppWindow /></div><div><strong>查找长期闲置的应用</strong><span>参考 Windows 使用记录，通过正式卸载程序移除</span></div><ChevronRight /></button>
           <button onClick={() => onNavigate('analysis')}><div className="action-icon blue"><BarChart3 /></div><div><strong>查看空间都去哪了</strong><span>分析 Windows、应用和用户文件占用</span></div><ChevronRight /></button>
         </div>
@@ -725,6 +810,23 @@ function AnalysisPage({ analysis, busy, onAnalyze }: { analysis: AnalysisResult 
             <div className="space-bar">{analysis.groups.filter((group) => group.bytes > 0).map((group) => <span key={group.id} style={{ width: `${Math.max(1, (group.bytes / total) * 100)}%`, background: group.color }} />)}</div>
             <div className="space-groups">{analysis.groups.map((group) => <div key={group.id}><i style={{ background: group.color }} /><span><strong>{group.title}</strong><small>{group.description}</small></span><b>{formatBytes(group.bytes)}</b></div>)}</div>
           </section>
+          {analysis.systemItems.length > 0 && (
+            <section className="content-card">
+              <div className="section-heading"><div><h2>系统保留空间说明</h2><p>这些项目能解释“其他与系统保留”的一部分占用，净盘不会直接删除或修改。</p></div><span className="read-only-badge"><ShieldCheck size={14} />只读识别</span></div>
+              <div className="system-space-list">
+                {analysis.systemItems.map((item) => (
+                  <div key={item.id}>
+                    <span className="setting-icon"><HardDrive /></span>
+                    <span><strong>{item.title}</strong><small>{item.description}</small></span>
+                    <b>{formatBytes(item.bytes)}</b>
+                    {item.action === 'storage-recommendations'
+                      ? <button className="link-button" onClick={() => void window.jingpan.openStorageRecommendations()}>交给 Windows 处理</button>
+                      : <em className="neutral-badge">系统管理</em>}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
           <section className="content-card">
             <div className="section-heading"><div><h2>大文件</h2><p>显示超过 500 MB 的文件。请打开所在位置后自行确认用途。</p></div><span className="read-only-badge"><ShieldCheck size={14} />只读列表</span></div>
             {analysis.largeFiles.length === 0 ? <div className="minor-empty">没有找到超过 500 MB 的普通文件</div> : <div className="large-files">{analysis.largeFiles.slice(0, 20).map((file) => <div key={file.path}><div className="file-type-icon"><FileText size={18} /></div><span><strong title={file.path}>{file.name}</strong><small>{file.path}</small></span><b>{formatBytes(file.bytes)}</b><button title="打开所在文件夹" onClick={() => void window.jingpan.revealLargeFile(file.path)}><FolderOpen size={18} /></button></div>)}</div>}
@@ -999,6 +1101,117 @@ function ChatFileRow({
   )
 }
 
+function DuplicateFilesPage({
+  result,
+  busy,
+  selected,
+  onScan,
+  onSelectedChange,
+  onOpen,
+  onRecycle
+}: {
+  result: DuplicateFileScanResult | null
+  busy: BusyTask
+  selected: Set<string>
+  onScan: () => void
+  onSelectedChange: (selected: Set<string>) => void
+  onOpen: (fileId: string) => void
+  onRecycle: (ids: string[], bytes: number) => void
+}): React.JSX.Element {
+  const files = useMemo(() => result?.groups.flatMap((group) => group.files) ?? [], [result])
+  const selectedBytes = files.filter((file) => selected.has(file.id)).reduce((sum, file) => sum + file.bytes, 0)
+
+  const smartSelect = (): void => {
+    const next = new Set<string>()
+    for (const group of result?.groups ?? []) {
+      for (const file of group.files.slice(1)) {
+        if (next.size >= 2_000) break
+        next.add(file.id)
+      }
+      if (next.size >= 2_000) break
+    }
+    onSelectedChange(next)
+  }
+
+  const toggleFile = (groupId: string, fileId: string): void => {
+    const next = new Set(selected)
+    if (next.has(fileId)) {
+      next.delete(fileId)
+    } else {
+      const group = result?.groups.find((item) => item.id === groupId)
+      const selectedInGroup = group?.files.filter((file) => next.has(file.id)).length ?? 0
+      if (!group || selectedInGroup >= group.files.length - 1 || next.size >= 2_000) return
+      next.add(fileId)
+    }
+    onSelectedChange(next)
+  }
+
+  return (
+    <div className="page-stack">
+      <PageIntro
+        title="重复文件"
+        description="仅将大小相同且完整 SHA-256 一致的文件判定为重复；每组至少保留一份。"
+        action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新核对' : '扫描重复文件'}</button>}
+      />
+      <div className="info-banner duplicate-safety-banner">
+        <ShieldCheck size={19} />
+        <span><strong>内容核对，不凭文件名猜测</strong>只扫描 C 盘个人目录中 1 MB 以上的图片、视频、音频、文档、压缩包和安装包；OneDrive 等云目录不会读取内容，避免触发下载。</span>
+      </div>
+      {!result ? (
+        <EmptyState icon={CopyCheck} title="找出真正相同的文件副本" description="扫描会读取本地文件内容并计算 SHA-256，不上传文件。耗时取决于需要核对的文件大小。" button="开始核对" onClick={onScan} />
+      ) : result.groups.length === 0 ? (
+        <section className="content-card duplicate-empty">
+          <CheckCircle2 size={38} />
+          <h2>没有发现完全相同的个人文件</h2>
+          <p>已核对 {result.hashedFiles.toLocaleString('zh-CN')} 个同尺寸候选文件。1 MB 以下和云端文件未读取内容。</p>
+          <button className="secondary-button" onClick={onScan}><RefreshCw size={16} />重新核对</button>
+        </section>
+      ) : (
+        <>
+          {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>结果较多</strong>本次展示释放空间最大的 {result.groups.length.toLocaleString('zh-CN')} 组；可处理后再次扫描。</span></div>}
+          <div className="duplicate-summary-grid">
+            <div><strong>{result.groups.length.toLocaleString('zh-CN')}</strong><span>组完全相同</span></div>
+            <div><strong>{result.duplicateFiles.toLocaleString('zh-CN')}</strong><span>个重复文件</span></div>
+            <div><strong>{formatBytes(result.reclaimableBytes)}</strong><span>最多可回收</span></div>
+            <button onClick={smartSelect}><CopyCheck size={18} /><span><strong>智能选择副本</strong><small>每组保留最近修改的一份</small></span></button>
+          </div>
+          <div className="duplicate-groups">
+            {result.groups.map((group, groupIndex) => {
+              const selectedInGroup = group.files.filter((file) => selected.has(file.id)).length
+              return (
+                <section className="content-card duplicate-group" key={group.id}>
+                  <div className="duplicate-group-heading">
+                    <span><strong>重复组 {groupIndex + 1}</strong><small>{group.files.length} 份 · 每份 {formatBytes(group.bytesPerFile)} · 默认将最近修改的一份排在最前</small></span>
+                    <span><em className="enabled-badge">SHA-256 完全一致</em><b>可回收 {formatBytes(group.reclaimableBytes)}</b></span>
+                  </div>
+                  <div className="duplicate-file-list">
+                    {group.files.map((file) => (
+                      <UserFileRow
+                        key={file.id}
+                        file={file}
+                        checked={selected.has(file.id)}
+                        selectionDisabled={!selected.has(file.id) && (selectedInGroup >= group.files.length - 1 || selected.size >= 2_000)}
+                        onOpen={() => onOpen(file.id)}
+                        onToggle={() => toggleFile(group.id, file.id)}
+                        onReveal={() => void window.jingpan.revealDuplicateFile(file.id)}
+                      />
+                    ))}
+                  </div>
+                </section>
+              )
+            })}
+          </div>
+          <div className="sticky-action file-action">
+            <div><span>已选择 {selected.size} 个重复副本</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
+            <div className="recoverable-note"><ShieldCheck size={15} />每组至少保留一份 · 可从回收站恢复</div>
+            <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 function PersonalFilesPage({
   result,
   busy,
@@ -1058,8 +1271,8 @@ function PersonalFilesPage({
 
   return (
     <div className="page-stack">
-      <PageIntro title="个人文件" description="整理位于 C 盘的图片、视频、文本和办公文档。点击文件行可直接打开预览，只有勾选的文件才会移入回收站。" action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新整理' : '扫描个人文件'}</button>} />
-      {!result ? <EmptyState icon={FileText} title="整理 C 盘个人文件，找回更多空间" description="扫描位于 C 盘的桌面、下载、文档、图片、视频与 OneDrive，不读取文件内容。" button="开始整理" onClick={onScan} /> : (
+      <PageIntro title="个人文件" description="整理位于 C 盘的图片、视频、音频、文本和办公文档。点击文件行可直接打开预览，只有勾选的文件才会移入回收站。" action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新整理' : '扫描个人文件'}</button>} />
+      {!result ? <EmptyState icon={FileText} title="整理 C 盘个人文件，找回更多空间" description="读取 Windows 真实的桌面、下载、文档、图片、视频和音乐位置，并包含 C 盘 OneDrive；不读取文件内容。" button="开始整理" onClick={onScan} /> : (
         <>
           {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>文件数量较多</strong>共找到 {result.totalMatched.toLocaleString('zh-CN')} 项，当前展示占用最大的 {result.files.length.toLocaleString('zh-CN')} 项。</span></div>}
           <div className="file-kind-tabs">
@@ -1073,7 +1286,7 @@ function PersonalFilesPage({
           <section className="content-card file-browser">
             <div className="file-toolbar">
               <label className="search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文件名或位置" /></label>
-              <select value={location} onChange={(event) => setLocation(event.target.value as typeof location)}><option value="all">全部位置</option><option value="downloads">下载目录</option><option value="desktop">桌面</option><option value="documents">文档</option><option value="pictures">图片</option><option value="videos">视频</option><option value="onedrive">OneDrive</option></select>
+              <select value={location} onChange={(event) => setLocation(event.target.value as typeof location)}><option value="all">全部位置</option><option value="downloads">下载目录</option><option value="desktop">桌面</option><option value="documents">文档</option><option value="pictures">图片</option><option value="videos">视频</option><option value="music">音乐</option><option value="onedrive">OneDrive</option></select>
               <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
               <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
               <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
@@ -1095,7 +1308,21 @@ function PersonalFilesPage({
   )
 }
 
-function UserFileRow({ file, checked, onOpen, onToggle }: { file: UserFileItem; checked: boolean; onOpen: () => void; onToggle: () => void }): React.JSX.Element {
+function UserFileRow({
+  file,
+  checked,
+  selectionDisabled = false,
+  onOpen,
+  onToggle,
+  onReveal
+}: {
+  file: UserFileItem
+  checked: boolean
+  selectionDisabled?: boolean
+  onOpen: () => void
+  onToggle: () => void
+  onReveal?: () => void
+}): React.JSX.Element {
   const meta = FILE_KIND_META[file.kind]
   const Icon = meta.icon
   const directOpenAllowed = file.kind !== 'installer'
@@ -1114,10 +1341,10 @@ function UserFileRow({ file, checked, onOpen, onToggle }: { file: UserFileItem; 
         }
       }}
     >
-      <button className={`checkbox ${checked ? 'checked' : ''}`} aria-label={`选择 ${file.name}`} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
+      <button className={`checkbox ${checked ? 'checked' : ''}`} disabled={selectionDisabled} aria-label={`选择 ${file.name}`} title={selectionDisabled ? '每组至少保留一份，或已达到单次处理上限' : undefined} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
       <div className="file-name"><span style={{ color: meta.color }}><Icon size={19} /></span><div><strong title={file.name}>{file.name}</strong><small title={file.path}>{file.path}</small></div></div>
       <span>{formatDate(file.modifiedAt)}</span><b>{formatBytes(file.bytes)}</b>
-      <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); void window.jingpan.revealUserFile(file.id) }}><FolderOpen size={17} /></button>
+      <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); if (onReveal) onReveal(); else void window.jingpan.revealUserFile(file.id) }}><FolderOpen size={17} /></button>
     </div>
   )
 }
@@ -1157,7 +1384,9 @@ function SettingsPage({
         </div>
         <div><span className="setting-icon"><ShieldCheck /></span><span><strong>安全清理白名单</strong><small>只允许清理程序内置的临时文件和缓存目录，界面无法提交任意路径。</small></span><em className="enabled-badge">已开启</em></div>
         <div><span className="setting-icon"><MonitorCog /></span><span><strong>管理员权限</strong><small>{snapshot.isAdministrator ? '当前以管理员身份运行，可扫描更多 Windows 临时文件。' : '当前为普通权限；受保护文件会被安全跳过，无需特意提权。'}</small></span><em className={snapshot.isAdministrator ? 'enabled-badge' : 'neutral-badge'}>{snapshot.isAdministrator ? '管理员' : '普通权限'}</em></div>
-        <div><span className="setting-icon"><HardDrive /></span><span><strong>Windows 存储设置</strong><small>需要管理已安装应用或系统存储感知时，请使用 Windows 官方页面。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageSettings()}>打开设置</button></div>
+        <div><span className="setting-icon"><HardDrive /></span><span><strong>Windows 清理建议</strong><small>查看以前的 Windows 安装、大型或未使用文件、云同步文件和闲置应用等官方建议。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageRecommendations()}>打开建议</button></div>
+        <div><span className="setting-icon"><RefreshCw /></span><span><strong>自动存储感知</strong><small>设置 Windows 何时自动清理临时文件、回收站和本地云文件；下载目录默认不会被处理。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageSenseSettings()}>设置规则</button></div>
+        <div><span className="setting-icon"><FolderOpen /></span><span><strong>新内容保存位置</strong><small>把新应用、文档、音乐、图片和视频的默认保存位置改到其他磁盘，减少 C 盘再次变满。</small></span><button className="link-button" onClick={() => void window.jingpan.openSaveLocations()}>选择位置</button></div>
         <div><span className="setting-icon"><Sparkles /></span><span><strong>Windows 磁盘清理</strong><small>打开微软自带的磁盘清理窗口，由你选择 Windows 更新、临时安装文件等系统项目。</small></span><button className="link-button" onClick={() => void window.jingpan.openDiskCleanup()}>打开工具</button></div>
       </section>
       <section className="content-card safety-explainer">
@@ -1273,6 +1502,7 @@ function ConfirmDialog({ dialog, onCancel, onConfirm }: { dialog: Exclude<Dialog
   const cleanup = dialog.type === 'cleanup'
   const uninstall = dialog.type === 'uninstall'
   const chatRecycle = dialog.type === 'chat-recycle'
+  const duplicateRecycle = dialog.type === 'duplicate-recycle'
   const title = cleanup ? '确认开始安全清理？' : uninstall ? `卸载“${dialog.app.name}”？` : '确认移入回收站？'
   const description = cleanup
     ? `将清理 ${dialog.ids.length} 类白名单内容，预计释放 ${formatBytes(dialog.bytes)}。占用中或无权限文件会自动跳过。`
@@ -1280,6 +1510,8 @@ function ConfirmDialog({ dialog, onCancel, onConfirm }: { dialog: Exclude<Dialog
       ? '净盘将启动该应用登记在 Windows 中的正式卸载程序。请在随后出现的卸载向导中再次确认。'
       : chatRecycle
         ? `你选择了 ${dialog.ids.length} 个聊天文件，共 ${formatBytes(dialog.bytes)}。移除后，微信或 QQ 中对应的旧图片、视频和附件可能无法打开；文件仍可从 Windows 回收站恢复。`
+        : duplicateRecycle
+          ? `你选择了 ${dialog.ids.length} 个已通过 SHA-256 核对的重复副本，共 ${formatBytes(dialog.bytes)}。每组至少保留一份，所选文件仍可从 Windows 回收站恢复。`
         : `你选择了 ${dialog.ids.length} 个文件，共 ${formatBytes(dialog.bytes)}。操作后仍可在 Windows 回收站中恢复。`
   return (
     <div className="overlay"><div className="confirm-dialog"><div className={`confirm-icon ${cleanup ? '' : 'danger'}`}>{cleanup ? <ShieldCheck /> : uninstall ? <AppWindow /> : <Trash2 />}</div><h2>{title}</h2><p>{description}</p><div className="dialog-actions"><button className="secondary-button" onClick={onCancel}>取消</button><button className={cleanup ? 'primary-button' : 'danger-button'} onClick={onConfirm}>{cleanup ? '确认清理' : uninstall ? '打开卸载程序' : '移入回收站'}</button></div></div></div>

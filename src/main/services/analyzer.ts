@@ -1,6 +1,6 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
-import type { AnalysisResult, LargeFile, SpaceGroup, TaskProgress } from '../../shared/types'
+import type { AnalysisResult, LargeFile, SpaceGroup, SystemSpaceItem, TaskProgress } from '../../shared/types'
 import { isPathInside, type TaskController } from './filesystem'
 import { getDiskSummary, getSystemDrive } from './system'
 
@@ -19,6 +19,89 @@ interface LocationResult {
   files: number
   visited: number
   largeFiles: LargeFile[]
+}
+
+async function getFileBytes(filePath: string): Promise<number> {
+  try {
+    const stat = await fs.stat(filePath)
+    return stat.isFile() ? stat.size : 0
+  } catch {
+    return 0
+  }
+}
+
+async function analyzeSystemSpaceItems(
+  drive: string,
+  controller: TaskController,
+  onProgress: (progress: TaskProgress) => void
+): Promise<SystemSpaceItem[]> {
+  const root = `${drive}\\`
+  const definitions: Array<Omit<SystemSpaceItem, 'bytes'> & { path: string }> = [
+    {
+      id: 'hibernation',
+      title: '休眠与快速启动文件',
+      description: '由 Windows 管理，关闭休眠还会影响快速启动，净盘不会修改它。',
+      path: path.join(root, 'hiberfil.sys'),
+      action: 'none'
+    },
+    {
+      id: 'pagefile',
+      title: '虚拟内存分页文件',
+      description: '用于系统内存管理，不应当作为普通垃圾文件删除。',
+      path: path.join(root, 'pagefile.sys'),
+      action: 'none'
+    },
+    {
+      id: 'swapfile',
+      title: '应用交换文件',
+      description: '由 Windows 自动调度和维护，净盘仅展示其占用。',
+      path: path.join(root, 'swapfile.sys'),
+      action: 'none'
+    },
+    {
+      id: 'memory-dump',
+      title: '系统内存转储',
+      description: '蓝屏诊断留下的大型转储；不再排查故障时可交给 Windows 清理建议处理。',
+      path: path.join(root, 'Windows', 'MEMORY.DMP'),
+      action: 'storage-recommendations'
+    }
+  ]
+  const items: SystemSpaceItem[] = []
+  for (const definition of definitions) {
+    const bytes = await getFileBytes(definition.path)
+    if (bytes > 0) {
+      const { path: _path, ...meta } = definition
+      items.push({ ...meta, bytes })
+    }
+  }
+
+  const previousWindows = path.join(root, 'Windows.old')
+  try {
+    const stat = await fs.lstat(previousWindows)
+    if (stat.isDirectory() && !stat.isSymbolicLink() && !controller.cancelled) {
+      const result = await analyzeRoot(previousWindows, controller, (visited) => {
+        onProgress({
+          kind: 'analyze',
+          percent: 97,
+          title: '正在核对旧版 Windows 占用',
+          detail: `已查看 ${visited.toLocaleString('zh-CN')} 个项目`,
+          filesVisited: visited
+        })
+      })
+      if (result.bytes > 0) {
+        items.push({
+          id: 'previous-windows',
+          title: '以前的 Windows 安装',
+          description: '删除后将无法回退到升级前的 Windows 版本，请在官方清理建议中确认。',
+          bytes: result.bytes,
+          action: 'storage-recommendations'
+        })
+      }
+    }
+  } catch {
+    // Missing or protected previous installation folders are omitted.
+  }
+  return items.sort((left, right) => right.bytes - left.bytes)
 }
 
 function addLargeFile(list: LargeFile[], file: LargeFile): void {
@@ -162,6 +245,8 @@ export async function analyzeSystemDrive(
     fileCount: 0
   })
 
+  const systemItems = await analyzeSystemSpaceItems(drive, controller, onProgress)
+
   onProgress({
     kind: 'analyze',
     percent: 100,
@@ -172,6 +257,7 @@ export async function analyzeSystemDrive(
   return {
     groups,
     largeFiles,
+    systemItems,
     analyzedAt: new Date().toISOString(),
     durationMs: Date.now() - startedAt,
     cancelled: controller.cancelled

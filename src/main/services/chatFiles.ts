@@ -13,6 +13,7 @@ import type {
   TaskProgress
 } from '../../shared/types'
 import { isPathInsideOrEqual, type TaskController } from './filesystem'
+import { getKnownFolderPaths } from './knownFolders'
 import { runPowerShellJson } from './powershell'
 import { getSystemDrive } from './system'
 
@@ -550,8 +551,10 @@ export async function resolveQqStorageBase(candidate: string): Promise<string | 
   return null
 }
 
-function getDocumentRoots(): string[] {
+async function getDocumentRoots(): Promise<string[]> {
   const roots = new Set<string>()
+  const known = await getKnownFolderPaths()
+  if (known.documents) roots.add(known.documents)
   const profile = process.env.USERPROFILE
   if (profile) roots.add(path.join(profile, 'Documents'))
   for (const oneDrive of [
@@ -565,7 +568,7 @@ function getDocumentRoots(): string[] {
 }
 
 async function getChatRoots(options: ChatFileScanOptions): Promise<ChatRootDiscovery> {
-  const documentRoots = options.documentRoots ?? getDocumentRoots()
+  const documentRoots = options.documentRoots ?? await getDocumentRoots()
   const searchRoots = options.qqSearchRoots
     ?? (options.documentRoots === undefined ? await getFixedDriveRoots() : [])
   const discoveredQqBases = await discoverQqBases(searchRoots)

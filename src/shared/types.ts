@@ -85,14 +85,26 @@ export interface LargeFile {
 export interface AnalysisResult {
   groups: SpaceGroup[]
   largeFiles: LargeFile[]
+  systemItems: SystemSpaceItem[]
   analyzedAt: string
   durationMs: number
   cancelled: boolean
 }
 
+export type SystemSpaceItemId = 'hibernation' | 'pagefile' | 'swapfile' | 'memory-dump' | 'previous-windows'
+
+export interface SystemSpaceItem {
+  id: SystemSpaceItemId
+  title: string
+  description: string
+  bytes: number
+  action: 'none' | 'storage-recommendations'
+}
+
 export type UserFileKind =
   | 'image'
   | 'video'
+  | 'audio'
   | 'text'
   | 'word'
   | 'powerpoint'
@@ -107,6 +119,7 @@ export type UserFileLocation =
   | 'documents'
   | 'pictures'
   | 'videos'
+  | 'music'
   | 'onedrive'
 
 export interface UserFileItem {
@@ -140,6 +153,26 @@ export interface UserFileDeleteResult {
 export interface UserFileOpenResult {
   opened: boolean
   message: string
+}
+
+export interface DuplicateFileGroup {
+  id: string
+  bytesPerFile: number
+  reclaimableBytes: number
+  files: UserFileItem[]
+}
+
+export interface DuplicateFileScanResult {
+  groups: DuplicateFileGroup[]
+  scannedAt: string
+  durationMs: number
+  cancelled: boolean
+  truncated: boolean
+  candidateFiles: number
+  hashedFiles: number
+  duplicateFiles: number
+  reclaimableBytes: number
+  cloudFoldersSkipped: boolean
 }
 
 export type ChatPlatform = 'wechat' | 'qq'
@@ -273,12 +306,20 @@ export interface JingpanApi {
   cancelAnalysis: () => Promise<void>
   revealLargeFile: (path: string) => Promise<boolean>
   openStorageSettings: () => Promise<void>
+  openStorageRecommendations: () => Promise<void>
+  openStorageSenseSettings: () => Promise<void>
+  openSaveLocations: () => Promise<void>
   openDiskCleanup: () => Promise<void>
   scanUserFiles: () => Promise<UserFileScanResult>
   cancelUserFileScan: () => Promise<void>
   recycleUserFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
   openUserFile: (fileId: string) => Promise<UserFileOpenResult>
   revealUserFile: (fileId: string) => Promise<boolean>
+  scanDuplicateFiles: () => Promise<DuplicateFileScanResult>
+  cancelDuplicateFileScan: () => Promise<void>
+  recycleDuplicateFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>
+  openDuplicateFile: (fileId: string) => Promise<UserFileOpenResult>
+  revealDuplicateFile: (fileId: string) => Promise<boolean>
   scanChatFiles: () => Promise<ChatFileScanResult>
   chooseQqStorageFolder: () => Promise<ChatStorageFolderResult>
   cancelChatFileScan: () => Promise<void>

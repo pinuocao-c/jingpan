@@ -44,6 +44,7 @@ describe('personal file classification', () => {
     expect(detectUserFileKind('readme.txt')).toBe('text')
     expect(detectUserFileKind('notes.md')).toBe('text')
     expect(detectUserFileKind('history.log')).toBe('text')
+    expect(detectUserFileKind('meeting.mp3')).toBe('audio')
     expect(detectUserFileKind('cleanup.ps1')).toBeUndefined()
     expect(detectUserFileKind('launch.bat')).toBeUndefined()
   })

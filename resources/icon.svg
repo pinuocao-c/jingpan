@@ -1,19 +1,70 @@
 <svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <linearGradient id="background" x1="72" y1="54" x2="430" y2="458" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#5B84FF"/>
-      <stop offset="1" stop-color="#315DE5"/>
+    <linearGradient id="body" x1="92" y1="62" x2="421" y2="449" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#54C7FF"/>
+      <stop offset="0.34" stop-color="#248DFF"/>
+      <stop offset="0.68" stop-color="#315FE9"/>
+      <stop offset="1" stop-color="#3137A9"/>
     </linearGradient>
-    <filter id="shadow" x="44" y="45" width="424" height="432" filterUnits="userSpaceOnUse">
-      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#2449B0" flood-opacity=".22"/>
+    <linearGradient id="depth" x1="256" y1="198" x2="256" y2="454" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#183B9A" stop-opacity="0"/>
+      <stop offset="1" stop-color="#102366" stop-opacity="0.56"/>
+    </linearGradient>
+    <linearGradient id="glassSheen" x1="114" y1="56" x2="345" y2="337" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity="0.82"/>
+      <stop offset="0.35" stop-color="#DDF7FF" stop-opacity="0.28"/>
+      <stop offset="0.7" stop-color="#8FD4FF" stop-opacity="0.04"/>
+      <stop offset="1" stop-color="#8FD4FF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="95" y1="76" x2="409" y2="442" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity="0.9"/>
+      <stop offset="0.34" stop-color="#DDF5FF" stop-opacity="0.28"/>
+      <stop offset="0.7" stop-color="#8EC8FF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#D8D0FF" stop-opacity="0.42"/>
+    </linearGradient>
+    <linearGradient id="glyph" x1="184" y1="156" x2="316" y2="374" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white"/>
+      <stop offset="0.55" stop-color="#F2FBFF"/>
+      <stop offset="1" stop-color="#CFEAFF"/>
+    </linearGradient>
+    <radialGradient id="caustic" cx="0" cy="0" r="1" gradientTransform="translate(168 120) rotate(51) scale(254 293)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity="0.7"/>
+      <stop offset="0.42" stop-color="#C9F1FF" stop-opacity="0.14"/>
+      <stop offset="1" stop-color="#C9F1FF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="tileClip">
+      <rect x="54" y="48" width="404" height="404" rx="126"/>
+    </clipPath>
+    <filter id="tileShadow" x="14" y="20" width="484" height="486" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="22" stdDeviation="19" flood-color="#142D74" flood-opacity="0.32"/>
+      <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#3AA8FF" flood-opacity="0.22"/>
+    </filter>
+    <filter id="glyphShadow" x="102" y="96" width="324" height="334" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="9" stdDeviation="8" flood-color="#0D3C9E" flood-opacity="0.35"/>
+      <feDropShadow dx="0" dy="1" stdDeviation="1" flood-color="white" flood-opacity="0.32"/>
     </filter>
   </defs>
-  <g filter="url(#shadow)">
-    <rect x="68" y="61" width="376" height="376" rx="112" fill="url(#background)"/>
+
+  <g filter="url(#tileShadow)">
+    <rect x="54" y="48" width="404" height="404" rx="126" fill="url(#body)"/>
   </g>
-  <path d="M161 326C177 292 184 254 180 213" stroke="white" stroke-width="26" stroke-linecap="round"/>
-  <path d="M142 337C184 339 222 350 253 374" stroke="white" stroke-width="26" stroke-linecap="round"/>
-  <path d="M185 331C211 296 229 257 237 214" stroke="white" stroke-width="26" stroke-linecap="round"/>
-  <path d="M279 125L291 165L331 177L291 189L279 229L267 189L227 177L267 165L279 125Z" fill="white"/>
-  <path d="M360 223L369 253L399 262L369 271L360 301L351 271L321 262L351 253L360 223Z" fill="#D9E3FF"/>
+  <g clip-path="url(#tileClip)">
+    <rect x="54" y="48" width="404" height="404" rx="126" fill="url(#depth)"/>
+    <ellipse cx="157" cy="83" rx="234" ry="188" fill="url(#caustic)"/>
+    <path d="M23 246C129 134 276 95 487 122V232C318 204 176 239 67 346L23 246Z" fill="url(#glassSheen)" opacity="0.48"/>
+    <path d="M76 386C181 426 332 435 447 365V475H69L76 386Z" fill="#111D70" opacity="0.13"/>
+    <path d="M74 101C114 58 178 46 253 52" stroke="white" stroke-opacity="0.62" stroke-width="9" stroke-linecap="round"/>
+    <ellipse cx="392" cy="106" rx="61" ry="91" fill="#79D8FF" opacity="0.15" transform="rotate(-29 392 106)"/>
+  </g>
+  <rect x="55.5" y="49.5" width="401" height="401" rx="124.5" stroke="url(#edge)" stroke-width="3"/>
+  <rect x="65.5" y="59.5" width="381" height="381" rx="115.5" stroke="white" stroke-opacity="0.16"/>
+
+  <g filter="url(#glyphShadow)">
+    <path d="M164 327C181 291 188 251 184 208" stroke="url(#glyph)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M145 339C189 341 229 353 261 379" stroke="url(#glyph)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M189 333C216 296 234 255 243 210" stroke="url(#glyph)" stroke-width="28" stroke-linecap="round"/>
+    <path d="M286 121L299 164L342 177L299 190L286 233L273 190L230 177L273 164L286 121Z" fill="url(#glyph)"/>
+    <path d="M371 224L380 255L411 264L380 273L371 304L362 273L331 264L362 255L371 224Z" fill="#DDF4FF"/>
+  </g>
+  <path d="M260 143C277 135 295 134 310 139" stroke="white" stroke-opacity="0.7" stroke-width="3" stroke-linecap="round"/>
 </svg>

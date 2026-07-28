@@ -25,6 +25,8 @@ describe('personal file snapshot verification', () => {
         realPath,
         approvedLexicalRoot: root,
         approvedRealRoot: await fs.realpath(root),
+        cloudBacked: false,
+        linkCount: stat.nlink,
         device: stat.dev,
         inode: stat.ino,
         modifiedMs: stat.mtimeMs

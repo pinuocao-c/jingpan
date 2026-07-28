@@ -3,6 +3,8 @@ out/
 dist/
 release/
 coverage/
+.tmp-*
+prototypes/
 *.log
 .DS_Store
 Thumbs.db

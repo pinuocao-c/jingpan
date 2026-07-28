@@ -40,7 +40,7 @@ export interface AppSnapshot {
 }
 
 export interface TaskProgress {
-  kind: 'scan' | 'clean' | 'analyze'
+  kind: 'scan' | 'clean' | 'analyze' | 'migrate'
   percent: number
   title: string
   detail: string
@@ -121,6 +121,8 @@ export type UserFileLocation =
   | 'videos'
   | 'music'
   | 'onedrive'
+
+export type FileThumbnailScope = 'user' | 'duplicate' | 'chat' | 'migration'
 
 export interface UserFileItem {
   id: string
@@ -296,6 +298,57 @@ export interface UninstallLaunchResult {
   message: string
 }
 
+export type MigrationConfidence = 'recommended' | 'review'
+
+export interface MigrationCandidate extends UserFileItem {
+  confidence: MigrationConfidence
+  reason: string
+  destinationPath: string
+}
+
+export interface MigrationScanResult {
+  scanId: string
+  files: MigrationCandidate[]
+  destinationRoot: string
+  destinationFreeBytes: number
+  eligibleBytes: number
+  recommendedBytes: number
+  scannedAt: string
+  durationMs: number
+  cancelled: boolean
+  truncated: boolean
+  excludedCount: number
+}
+
+export interface MigratedFileResult {
+  id: string
+  name: string
+  sourcePath: string
+  destinationPath: string
+  bytes: number
+  sourceRemoved: boolean
+}
+
+export interface MigrationResult {
+  batchId: string
+  files: MigratedFileResult[]
+  moved: number
+  copiedSourceKept: number
+  failed: number
+  reclaimedBytes: number
+  failedIds: string[]
+  errors: string[]
+  cancelled: boolean
+}
+
+export interface MigrationUndoResult {
+  restored: number
+  destinationCopiesKept: number
+  failed: number
+  restoredBytes: number
+  errors: string[]
+}
+
 export interface JingpanApi {
   getSnapshot: () => Promise<AppSnapshot>
   startScan: () => Promise<ScanResult>
@@ -328,6 +381,13 @@ export interface JingpanApi {
   revealChatFile: (fileId: string) => Promise<boolean>
   scanInstalledApps: () => Promise<InstalledAppScanResult>
   launchAppUninstaller: (appId: string) => Promise<UninstallLaunchResult>
+  scanMigrationCandidates: () => Promise<MigrationScanResult>
+  cancelMigrationScan: () => Promise<void>
+  migrateFiles: (scanId: string, fileIds: string[]) => Promise<MigrationResult>
+  cancelMigration: () => Promise<void>
+  undoMigration: (batchId: string) => Promise<MigrationUndoResult>
+  revealMigratedFile: (batchId: string, fileId: string) => Promise<boolean>
+  getFileThumbnail: (scope: FileThumbnailScope, fileId: string) => Promise<string | null>
   checkForUpdates: (force?: boolean) => Promise<UpdateCheckResult>
   downloadUpdate: () => Promise<boolean>
   openUpdatePage: () => Promise<boolean>

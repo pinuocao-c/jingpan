@@ -146,6 +146,8 @@ async function collectCandidates(
             realPath: realCandidate,
             approvedLexicalRoot: root.lexicalRoot,
             approvedRealRoot: root.realRoot,
+            cloudBacked: root.cloudBacked,
+            linkCount: stat.nlink,
             device: stat.dev,
             inode: stat.ino,
             modifiedMs: stat.mtimeMs

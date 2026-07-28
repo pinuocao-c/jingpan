@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { CategoryId, JingpanApi, TaskProgress } from '../shared/types'
+import type { CategoryId, FileThumbnailScope, JingpanApi, TaskProgress } from '../shared/types'
 
 const api: JingpanApi = {
   getSnapshot: () => ipcRenderer.invoke('app:snapshot'),
@@ -33,6 +33,13 @@ const api: JingpanApi = {
   revealChatFile: (fileId: string) => ipcRenderer.invoke('chat-files:reveal', fileId),
   scanInstalledApps: () => ipcRenderer.invoke('apps:scan'),
   launchAppUninstaller: (appId: string) => ipcRenderer.invoke('apps:uninstall', appId),
+  scanMigrationCandidates: () => ipcRenderer.invoke('migration:scan'),
+  cancelMigrationScan: () => ipcRenderer.invoke('migration:cancel-scan'),
+  migrateFiles: (scanId: string, fileIds: string[]) => ipcRenderer.invoke('migration:start', scanId, fileIds),
+  cancelMigration: () => ipcRenderer.invoke('migration:cancel'),
+  undoMigration: (batchId: string) => ipcRenderer.invoke('migration:undo', batchId),
+  revealMigratedFile: (batchId: string, fileId: string) => ipcRenderer.invoke('migration:reveal', batchId, fileId),
+  getFileThumbnail: (scope: FileThumbnailScope, fileId: string) => ipcRenderer.invoke('file:thumbnail', scope, fileId),
   checkForUpdates: (force = false) => ipcRenderer.invoke('updates:check', force),
   downloadUpdate: () => ipcRenderer.invoke('updates:download'),
   openUpdatePage: () => ipcRenderer.invoke('updates:open-page'),

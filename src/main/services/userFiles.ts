@@ -46,6 +46,8 @@ export interface InternalUserFile extends UserFileItem {
   realPath: string
   approvedLexicalRoot: string
   approvedRealRoot: string
+  cloudBacked: boolean
+  linkCount: number
   device: number
   inode: number
   modifiedMs: number
@@ -182,6 +184,8 @@ function publicFile(file: InternalUserFile): UserFileItem {
     realPath: _realPath,
     approvedLexicalRoot: _approvedLexicalRoot,
     approvedRealRoot: _approvedRealRoot,
+    cloudBacked: _cloudBacked,
+    linkCount: _linkCount,
     device: _device,
     inode: _inode,
     modifiedMs: _modifiedMs,
@@ -192,7 +196,11 @@ function publicFile(file: InternalUserFile): UserFileItem {
 
 export async function scanPersonalFiles(
   controller: TaskController,
-  onProgress: (progress: TaskProgress) => void
+  onProgress: (progress: TaskProgress) => void,
+  options: {
+    progressTitle?: string
+    progressCompleteTitle?: string
+  } = {}
 ): Promise<PersonalFileSnapshot> {
   const startedAt = Date.now()
   const roots = await getPersonalRoots()
@@ -258,6 +266,8 @@ export async function scanPersonalFiles(
               realPath: realCandidate,
               approvedLexicalRoot: root.lexicalRoot,
               approvedRealRoot: root.realRoot,
+              cloudBacked: root.cloudBacked,
+              linkCount: stat.nlink,
               device: stat.dev,
               inode: stat.ino,
               modifiedMs: stat.mtimeMs
@@ -271,7 +281,7 @@ export async function scanPersonalFiles(
           onProgress({
             kind: 'analyze',
             percent: Math.min(96, Math.round(((rootIndex + 0.55) / Math.max(1, roots.length)) * 100)),
-            title: '正在整理 C 盘个人文件',
+            title: options.progressTitle ?? '正在整理 C 盘个人文件',
             detail: `已找到 ${totalMatched.toLocaleString('zh-CN')} 个文件`,
             filesVisited: visited
           })
@@ -287,7 +297,7 @@ export async function scanPersonalFiles(
   onProgress({
     kind: 'analyze',
     percent: 100,
-    title: 'C 盘个人文件整理完成',
+    title: options.progressCompleteTitle ?? 'C 盘个人文件整理完成',
     detail: truncated
       ? `共找到 ${totalMatched.toLocaleString('zh-CN')} 项，已显示最大的 ${MAX_RESULTS.toLocaleString('zh-CN')} 项`
       : `共找到 ${files.length.toLocaleString('zh-CN')} 个文件`
@@ -319,6 +329,7 @@ export async function verifyUserFileSnapshot(file: InternalUserFile): Promise<bo
 
     return stat.dev === file.device
       && stat.ino === file.inode
+      && stat.nlink === file.linkCount
       && stat.size === file.bytes
       && Math.abs(stat.mtimeMs - file.modifiedMs) < 1
   } catch {

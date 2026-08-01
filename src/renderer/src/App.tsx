@@ -23,6 +23,8 @@ import {
   Gauge,
   HardDrive,
   LayoutDashboard,
+  LayoutGrid,
+  List,
   LoaderCircle,
   MessageCircle,
   MonitorCog,
@@ -81,6 +83,7 @@ type BusyTask =
   | 'migration'
   | 'migration-undo'
   | null
+type FileViewMode = 'list' | 'grid'
 type Dialog =
   | { type: 'cleanup'; ids: CategoryId[]; bytes: number }
   | { type: 'recycle'; ids: string[]; bytes: number }
@@ -978,6 +981,89 @@ function AnalysisPage({ analysis, busy, onAnalyze }: { analysis: AnalysisResult 
   )
 }
 
+function FileViewToggle({
+  value,
+  onChange
+}: {
+  value: FileViewMode
+  onChange: (value: FileViewMode) => void
+}): React.JSX.Element {
+  return (
+    <div className="view-toggle" role="group" aria-label="切换文件预览方式">
+      <button className={value === 'list' ? 'active' : ''} type="button" onClick={() => onChange('list')}><List size={16} />列表</button>
+      <button className={value === 'grid' ? 'active' : ''} type="button" onClick={() => onChange('grid')}><LayoutGrid size={16} />方块</button>
+    </div>
+  )
+}
+
+function PaginationControl({
+  page,
+  pageCount,
+  onPageChange
+}: {
+  page: number
+  pageCount: number
+  onPageChange: (page: number) => void
+}): React.JSX.Element {
+  const [draft, setDraft] = useState(String(page))
+  useEffect(() => setDraft(String(page)), [page])
+  const commit = (): void => {
+    const parsed = Number.parseInt(draft, 10)
+    if (!Number.isFinite(parsed)) {
+      setDraft(String(page))
+      return
+    }
+    const nextPage = Math.min(pageCount, Math.max(1, parsed))
+    setDraft(String(nextPage))
+    onPageChange(nextPage)
+  }
+  return (
+    <div className="pagination">
+      <span>第</span>
+      <input
+        aria-label="输入页码"
+        inputMode="numeric"
+        min={1}
+        max={pageCount}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value.replace(/[^\d]/g, '').slice(0, 5))}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            commit()
+          }
+        }}
+      />
+      <span>/ {pageCount} 页</span>
+      <button disabled={page <= 1} onClick={() => onPageChange(page - 1)}><ChevronLeft size={17} /></button>
+      <button disabled={page >= pageCount} onClick={() => onPageChange(page + 1)}><ChevronRight size={17} /></button>
+    </div>
+  )
+}
+
+function FileRecycleAction({
+  selectedCount,
+  selectedBytes,
+  disabled,
+  onRecycle,
+  className = ''
+}: {
+  selectedCount: number
+  selectedBytes: number
+  disabled: boolean
+  onRecycle: () => void
+  className?: string
+}): React.JSX.Element {
+  return (
+    <div className={`file-recycle-action ${className}`}>
+      <div><span>已选择 {selectedCount} 个文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
+      <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
+      <button className="danger-button" disabled={disabled} onClick={onRecycle}><Trash2 size={18} />移入回收站</button>
+    </div>
+  )
+}
+
 function ChatFilesPage({
   result,
   busy,
@@ -1003,8 +1089,9 @@ function ChatFilesPage({
   const [age, setAge] = useState<'all' | '30' | '90' | '180' | '365'>('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<'size' | 'date' | 'name'>('size')
+  const [viewMode, setViewMode] = useState<FileViewMode>('list')
   const [page, setPage] = useState(1)
-  const pageSize = 50
+  const pageSize = viewMode === 'grid' ? 48 : 50
 
   const platformFiles = useMemo(
     () => (result?.files ?? []).filter((file) => platform === 'all' || file.platform === platform),
@@ -1174,27 +1261,41 @@ function ChatFilesPage({
                   <select value={account} onChange={(event) => setAccount(event.target.value)}><option value="all">全部账号</option>{availableAccounts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
                   <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="30">30 天未修改</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
                   <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
+                  <FileViewToggle value={viewMode} onChange={setViewMode} />
                   <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
                 </div>
-                <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（可预览时点击打开）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
-                <div className="chat-file-table">
-                  {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
-                    <ChatFileRow
-                      key={file.id}
-                      file={file}
-                      checked={selected.has(file.id)}
-                      onOpen={() => onOpen(file.id)}
-                      onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
-                    />
-                  ))}
-                </div>
-                <div className="pagination"><span>第 {page} / {pageCount} 页</span><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button></div>
+                <FileRecycleAction className="top-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
+                {viewMode === 'list' ? (
+                  <>
+                    <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（可预览时点击打开）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
+                    <div className="chat-file-table">
+                      {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
+                        <ChatFileRow
+                          key={file.id}
+                          file={file}
+                          checked={selected.has(file.id)}
+                          onOpen={() => onOpen(file.id)}
+                          onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
+                        />
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="file-grid">
+                    {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
+                      <ChatFileCard
+                        key={file.id}
+                        file={file}
+                        checked={selected.has(file.id)}
+                        onOpen={() => onOpen(file.id)}
+                        onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
+                      />
+                    ))}
+                  </div>
+                )}
+                <PaginationControl page={page} pageCount={pageCount} onPageChange={setPage} />
               </section>
-              <div className="sticky-action file-action">
-                <div><span>已选择 {selected.size} 个聊天文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
-                <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
-                <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
-              </div>
+              <FileRecycleAction className="sticky-action file-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
             </>
           )}
         </>
@@ -1238,6 +1339,53 @@ function ChatFileRow({
       <span>{formatDate(file.modifiedAt)}</span>
       <b>{formatBytes(file.bytes)}</b>
       <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); void window.jingpan.revealChatFile(file.id) }}><FolderOpen size={17} /></button>
+    </div>
+  )
+}
+
+function ChatFileCard({
+  file,
+  checked,
+  onOpen,
+  onToggle
+}: {
+  file: ChatFileItem
+  checked: boolean
+  onOpen: () => void
+  onToggle: () => void
+}): React.JSX.Element {
+  const meta = CHAT_FILE_KIND_META[file.kind]
+  const Icon = meta.icon
+  const sourceLabel = `${file.platform === 'wechat' ? '微信' : 'QQ'} · ${CHAT_AREA_LABELS[file.area]}${file.onSystemDrive ? '' : ` · ${file.drive}盘`}`
+  return (
+    <div
+      className={`file-card chat-file-card ${checked ? 'selected' : ''} ${file.previewable ? 'openable' : 'protected-file'}`}
+      role="button"
+      tabIndex={0}
+      title={file.previewable ? `打开或预览 ${file.name}` : '此文件不支持安全预览，可使用右侧按钮查看所在位置'}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
+    >
+      <button className={`checkbox ${checked ? 'checked' : ''}`} aria-label={`选择 ${file.name}`} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
+      <FileThumbnail scope="chat" fileId={file.id} kind={file.kind} color={meta.color} icon={Icon} />
+      <div className="file-card-body">
+        <strong title={file.name}>{file.name}</strong>
+        <small title={file.path}>{file.path}</small>
+      </div>
+      <div className="file-card-meta">
+        <span className={`chat-source-badge ${file.platform}`} title={`${file.accountLabel} · ${file.drive}盘`}>{sourceLabel}</span>
+        <b>{formatBytes(file.bytes)}</b>
+      </div>
+      <div className="file-card-foot">
+        <span>{formatDate(file.modifiedAt)}</span>
+        <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); void window.jingpan.revealChatFile(file.id) }}><FolderOpen size={17} /></button>
+      </div>
     </div>
   )
 }
@@ -1376,8 +1524,9 @@ function PersonalFilesPage({
   const [age, setAge] = useState<'all' | '90' | '180' | '365'>('all')
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<'size' | 'date' | 'name'>('size')
+  const [viewMode, setViewMode] = useState<FileViewMode>('list')
   const [page, setPage] = useState(1)
-  const pageSize = 50
+  const pageSize = viewMode === 'grid' ? 48 : 50
 
   const filtered = useMemo(() => {
     const query = search.trim().toLocaleLowerCase('zh-CN')
@@ -1431,19 +1580,25 @@ function PersonalFilesPage({
               <select value={location} onChange={(event) => setLocation(event.target.value as typeof location)}><option value="all">全部位置</option><option value="downloads">下载目录</option><option value="desktop">桌面</option><option value="documents">文档</option><option value="pictures">图片</option><option value="videos">视频</option><option value="music">音乐</option><option value="onedrive">OneDrive</option></select>
               <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
               <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
+              <FileViewToggle value={viewMode} onChange={setViewMode} />
               <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
             </div>
-            <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（点击可打开或预览）</span><span>修改日期</span><span>大小</span><span /></div>
-            <div className="file-table">
-              {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
-            </div>
-            <div className="pagination"><span>第 {page} / {pageCount} 页</span><button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button><button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button></div>
+            <FileRecycleAction className="top-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
+            {viewMode === 'list' ? (
+              <>
+                <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（点击可打开或预览）</span><span>修改日期</span><span>大小</span><span /></div>
+                <div className="file-table">
+                  {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
+                </div>
+              </>
+            ) : (
+              <div className="file-grid">
+                {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileCard key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
+              </div>
+            )}
+            <PaginationControl page={page} pageCount={pageCount} onPageChange={setPage} />
           </section>
-          <div className="sticky-action file-action">
-            <div><span>已选择 {selected.size} 个文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
-            <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
-            <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
-          </div>
+          <FileRecycleAction className="sticky-action file-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
         </>
       )}
     </div>
@@ -1647,6 +1802,59 @@ function UserFileRow({
   )
 }
 
+function UserFileCard({
+  file,
+  checked,
+  selectionDisabled = false,
+  onOpen,
+  onToggle,
+  onReveal,
+  thumbnailScope = 'user'
+}: {
+  file: UserFileItem
+  checked: boolean
+  selectionDisabled?: boolean
+  onOpen: () => void
+  onToggle: () => void
+  onReveal?: () => void
+  thumbnailScope?: FileThumbnailScope
+}): React.JSX.Element {
+  const meta = FILE_KIND_META[file.kind]
+  const Icon = meta.icon
+  const directOpenAllowed = file.kind !== 'installer'
+  return (
+    <div
+      className={`file-card ${checked ? 'selected' : ''} ${directOpenAllowed ? 'openable' : 'protected-file'}`}
+      role="button"
+      tabIndex={0}
+      title={directOpenAllowed ? `打开或预览 ${file.name}` : '安装包为避免误运行，不支持直接打开'}
+      onClick={onOpen}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault()
+          onOpen()
+        }
+      }}
+    >
+      <button className={`checkbox ${checked ? 'checked' : ''}`} disabled={selectionDisabled} aria-label={`选择 ${file.name}`} title={selectionDisabled ? '每组至少保留一份，或已达到单次处理上限' : undefined} onClick={(event) => { event.stopPropagation(); onToggle() }}>{checked && <Check size={14} />}</button>
+      <FileThumbnail scope={thumbnailScope} fileId={file.id} kind={file.kind} color={meta.color} icon={Icon} />
+      <div className="file-card-body">
+        <strong title={file.name}>{file.name}</strong>
+        <small title={file.path}>{file.path}</small>
+      </div>
+      <div className="file-card-meta">
+        <span>{formatDate(file.modifiedAt)}</span>
+        <b>{formatBytes(file.bytes)}</b>
+      </div>
+      <div className="file-card-foot">
+        <span>{meta.label}</span>
+        <button className="icon-button" aria-label={`打开 ${file.name} 所在文件夹`} title="打开所在文件夹" onClick={(event) => { event.stopPropagation(); if (onReveal) onReveal(); else void window.jingpan.revealUserFile(file.id) }}><FolderOpen size={17} /></button>
+      </div>
+    </div>
+  )
+}
+
 function MigrationPage({
   result,
   lastResult,
@@ -1844,11 +2052,7 @@ function MigrationPage({
                     )
                   })}
             </div>
-            <div className="pagination">
-              <span>第 {page} / {pageCount} 页</span>
-              <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}><ChevronLeft size={17} /></button>
-              <button disabled={page >= pageCount} onClick={() => setPage((value) => value + 1)}><ChevronRight size={17} /></button>
-            </div>
+            <PaginationControl page={page} pageCount={pageCount} onPageChange={setPage} />
           </section>
 
           <div className="sticky-action migration-action" data-liquid-glass data-glass-depth="36">

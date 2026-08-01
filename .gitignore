@@ -3,6 +3,7 @@ out/
 dist/
 release/
 coverage/
+.cache/
 .tmp-*
 prototypes/
 *.log

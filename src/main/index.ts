@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { createReadStream, promises as fs } from 'node:fs'
+import { createReadStream, existsSync, mkdirSync, promises as fs } from 'node:fs'
 import { Readable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, protocol, session, shell, type IpcMainInvokeEvent } from 'electron'
@@ -105,6 +105,15 @@ const VIDEO_MIME_TYPES = new Map([
   ['.3gp', 'video/3gpp']
 ])
 
+const IMAGE_MIME_TYPES = new Map([
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.png', 'image/png'],
+  ['.gif', 'image/gif'],
+  ['.bmp', 'image/bmp'],
+  ['.webp', 'image/webp']
+])
+
 async function withThumbnailSlot<T>(work: () => Promise<T>): Promise<T> {
   if (activeThumbnailTasks >= MAX_CONCURRENT_THUMBNAILS) {
     await new Promise<void>((resolve) => thumbnailWaiters.push(resolve))
@@ -185,7 +194,7 @@ function registerMediaProtocol(): void {
       const scope = parts[0]
       const fileId = parts[1]
       if (
-        url.hostname !== 'thumbnail'
+        !['thumbnail', 'preview'].includes(url.hostname)
         || parts.length !== 2
         || !['user', 'duplicate', 'chat', 'migration'].includes(scope)
         || !fileId
@@ -193,8 +202,16 @@ function registerMediaProtocol(): void {
       ) return new Response(null, { status: 404 })
 
       const source = resolveThumbnailSource(scope as FileThumbnailScope, fileId)
-      const mimeType = source ? VIDEO_MIME_TYPES.get(path.extname(source.path).toLowerCase()) : undefined
-      if (!source || source.kind !== 'video' || !mimeType || !(await source.verify())) {
+      const extension = source ? path.extname(source.path).toLowerCase() : ''
+      const mimeType = source?.kind === 'video'
+        ? VIDEO_MIME_TYPES.get(extension)
+        : source?.kind === 'image'
+          ? IMAGE_MIME_TYPES.get(extension)
+          : undefined
+      const allowedKind = url.hostname === 'thumbnail'
+        ? source?.kind === 'video'
+        : source?.kind === 'video' || source?.kind === 'image'
+      if (!source || !allowedKind || !mimeType || !(await source.verify())) {
         return new Response(null, { status: 404 })
       }
 
@@ -309,6 +326,37 @@ function getTrustedDevUrl(): string | null {
   }
 }
 
+interface AppStorageMode {
+  dataPath: string
+  portableMode: boolean
+}
+
+function configureAppStorage(): AppStorageMode {
+  const executableDirectory = path.dirname(process.execPath)
+  const portableMarker = path.join(executableDirectory, '.jingpan-portable')
+  const dataPath = !app.isPackaged
+    ? path.resolve(process.cwd(), '.cache', 'app-data')
+    : existsSync(portableMarker)
+      ? path.join(executableDirectory, 'data')
+      : null
+
+  if (!dataPath) {
+    return { dataPath: app.getPath('userData'), portableMode: false }
+  }
+
+  const cachePath = path.join(dataPath, 'Cache')
+  const logsPath = path.join(dataPath, 'logs')
+  mkdirSync(cachePath, { recursive: true })
+  mkdirSync(logsPath, { recursive: true })
+  app.setPath('userData', dataPath)
+  app.setPath('sessionData', dataPath)
+  app.setAppLogsPath(logsPath)
+  app.commandLine.appendSwitch('disk-cache-dir', cachePath)
+  return { dataPath, portableMode: true }
+}
+
+const appStorage = configureAppStorage()
+
 function createWindow(): void {
   const nativeWindowTheme = (): { background: string; overlay: string; symbols: string } => nativeTheme.shouldUseDarkColors
     ? { background: '#0d1522', overlay: '#111b2a', symbols: '#d9e4f2' }
@@ -421,7 +469,14 @@ function registerIpc(): void {
   ipcMain.handle('app:snapshot', async (event) => {
     assertTrustedSender(event)
     const [disk, isAdministrator] = await Promise.all([getDiskSummary(), isRunningAsAdministrator()])
-    return { version: app.getVersion(), disk, categories: CATEGORY_META, isAdministrator }
+    return {
+      version: app.getVersion(),
+      disk,
+      categories: CATEGORY_META,
+      isAdministrator,
+      dataPath: appStorage.dataPath,
+      portableMode: appStorage.portableMode
+    }
   })
 
   ipcMain.handle('scan:start', async (event) => {
@@ -587,6 +642,22 @@ function registerIpc(): void {
         void shell.openExternal('ms-settings:storagesense').finally(resolve)
       })
     })
+  })
+
+  ipcMain.handle('settings:app-data', async (event) => {
+    assertTrustedSender(event)
+    const error = await shell.openPath(appStorage.dataPath)
+    return !error
+  })
+
+  ipcMain.handle('settings:recycle-bin', async (event) => {
+    assertTrustedSender(event)
+    try {
+      await shell.openExternal('shell:RecycleBinFolder')
+      return true
+    } catch {
+      return false
+    }
   })
 
   ipcMain.handle('user-files:scan', async (event) => {

@@ -1,12 +1,15 @@
 import {
   Archive,
+  ArrowDownNarrowWide,
   ArrowRightLeft,
+  ArrowUpNarrowWide,
   AppWindow,
   BarChart3,
   Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock3,
   CircleHelp,
   CopyCheck,
   Download,
@@ -32,6 +35,7 @@ import {
   Package,
   Presentation,
   RefreshCw,
+  Recycle,
   RotateCcw,
   Search,
   Settings,
@@ -42,6 +46,7 @@ import {
   X
 } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type {
   AnalysisResult,
   AppSnapshot,
@@ -68,6 +73,7 @@ import type {
   UserFileScanResult
 } from '../../shared/types'
 import { formatBytes, formatDate, formatDuration } from './format'
+import { compareFiles, formatScanAge, isScanStale, type FileSortKey, type SortDirection } from './fileUi'
 import LiquidGlassRenderer from './LiquidGlassRenderer'
 
 type Page = 'overview' | 'cleanup' | 'analysis' | 'duplicates' | 'chat' | 'files' | 'migration' | 'apps' | 'settings'
@@ -84,6 +90,24 @@ type BusyTask =
   | 'migration-undo'
   | null
 type FileViewMode = 'list' | 'grid'
+type RecycleScope = 'files' | 'chat' | 'duplicates'
+type RecycleReport = {
+  scope: RecycleScope
+  moved: number
+  movedBytes: number
+  systemBytes: number
+  otherBytes: number
+  failed: number
+  errors: string[]
+}
+type MediaPreviewItem = {
+  id: string
+  kind: 'image' | 'video'
+  name: string
+  path: string
+  bytes: number
+  modifiedAt: string
+}
 type Dialog =
   | { type: 'cleanup'; ids: CategoryId[]; bytes: number }
   | { type: 'recycle'; ids: string[]; bytes: number }
@@ -132,6 +156,25 @@ const CHAT_AREA_LABELS: Record<ChatFileArea, string> = {
   temporary: '临时文件'
 }
 
+function useStoredChoice<T extends string>(key: string, values: readonly T[], fallback: T): [T, (value: T) => void] {
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = window.localStorage.getItem(key) as T | null
+      return stored && values.includes(stored) ? stored : fallback
+    } catch {
+      return fallback
+    }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(key, value)
+    } catch {
+      // Preferences are optional; the file browser continues with in-memory state.
+    }
+  }, [key, value])
+  return [value, setValue]
+}
+
 const navItems: Array<{ id: Page; label: string; description: string; icon: typeof Gauge }> = [
   { id: 'overview', label: '空间概览', description: '查看 C 盘容量和建议操作', icon: LayoutDashboard },
   { id: 'cleanup', label: '安全清理', description: '扫描并清理白名单缓存', icon: Sparkles },
@@ -165,6 +208,7 @@ function App(): React.JSX.Element {
   const [dialog, setDialog] = useState<Dialog>(null)
   const [toast, setToast] = useState<{ tone: 'success' | 'warning'; text: string } | null>(null)
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null)
+  const [recycleReport, setRecycleReport] = useState<RecycleReport | null>(null)
   const [update, setUpdate] = useState<UpdateCheckResult | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
   const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(null)
@@ -261,6 +305,15 @@ function App(): React.JSX.Element {
     }
   }
 
+  const openRecycleBin = async (): Promise<void> => {
+    try {
+      const opened = await window.jingpan.openRecycleBin()
+      if (!opened) setToast({ tone: 'warning', text: '无法打开 Windows 回收站' })
+    } catch (error) {
+      setToast({ tone: 'warning', text: error instanceof Error ? error.message : '无法打开 Windows 回收站' })
+    }
+  }
+
   const runAnalysis = async (): Promise<void> => {
     if (busy) return
     setBusy('analysis')
@@ -278,6 +331,7 @@ function App(): React.JSX.Element {
     if (busy) return
     setBusy('duplicates')
     setSelectedDuplicateFiles(new Set())
+    setRecycleReport((current) => current?.scope === 'duplicates' ? null : current)
     setProgress({ kind: 'analyze', percent: 0, title: '准备核对重复文件', detail: '只处理 C 盘个人目录中 1 MB 以上的本地文件' })
     try {
       setDuplicateFiles(await window.jingpan.scanDuplicateFiles())
@@ -292,6 +346,7 @@ function App(): React.JSX.Element {
     if (busy) return
     setBusy('files')
     setSelectedFiles(new Set())
+    setRecycleReport((current) => current?.scope === 'files' ? null : current)
     setProgress({ kind: 'analyze', percent: 0, title: '准备整理个人文件', detail: '只读取个人目录中的文件信息' })
     try {
       setUserFiles(await window.jingpan.scanUserFiles())
@@ -332,6 +387,7 @@ function App(): React.JSX.Element {
     if (busy) return
     setBusy('chat')
     setSelectedChatFiles(new Set())
+    setRecycleReport((current) => current?.scope === 'chat' ? null : current)
     setProgress({ kind: 'analyze', percent: 0, title: '准备整理聊天文件', detail: '正在识别微信目录以及 QQ/NTQQ 的自定义数据位置' })
     try {
       setChatFiles(await window.jingpan.scanChatFiles())
@@ -396,23 +452,36 @@ function App(): React.JSX.Element {
   const confirmRecycle = async (): Promise<void> => {
     if (!dialog || dialog.type !== 'recycle' || !userFiles) return
     const ids = dialog.ids
+    const selectedById = new Map(userFiles.files.map((file) => [file.id, file]))
     setDialog(null)
     try {
       let movedToRecycleBin = 0
       let failed = 0
       const movedIds: string[] = []
+      const errors: string[] = []
       for (let index = 0; index < ids.length; index += 2_000) {
         const result = await window.jingpan.recycleUserFiles(ids.slice(index, index + 2_000))
         movedToRecycleBin += result.movedToRecycleBin
         failed += result.failed
         movedIds.push(...result.movedIds)
+        errors.push(...result.errors.slice(0, Math.max(0, 20 - errors.length)))
       }
       const removed = new Set(movedIds)
+      const movedBytes = movedIds.reduce((sum, id) => sum + (selectedById.get(id)?.bytes ?? 0), 0)
       setUserFiles({ ...userFiles, files: userFiles.files.filter((file) => !removed.has(file.id)) })
       setSelectedFiles(new Set(ids.filter((id) => !removed.has(id))))
+      setRecycleReport({
+        scope: 'files',
+        moved: movedToRecycleBin,
+        movedBytes,
+        systemBytes: movedBytes,
+        otherBytes: 0,
+        failed,
+        errors
+      })
       setToast({
         tone: failed > 0 ? 'warning' : 'success',
-        text: `${movedToRecycleBin} 个文件已移入回收站${failed ? `，${failed} 个文件已变化或处理失败` : ''}`
+        text: `${movedToRecycleBin} 个文件（${formatBytes(movedBytes)}）已移入回收站${failed ? `，${failed} 个处理失败` : ''}`
       })
     } catch (error) {
       setToast({ tone: 'warning', text: error instanceof Error ? error.message : '文件未能移入回收站' })
@@ -422,18 +491,25 @@ function App(): React.JSX.Element {
   const confirmChatRecycle = async (): Promise<void> => {
     if (!dialog || dialog.type !== 'chat-recycle' || !chatFiles) return
     const ids = dialog.ids
+    const selectedById = new Map(chatFiles.files.map((file) => [file.id, file]))
     setDialog(null)
     try {
       let movedToRecycleBin = 0
       let failed = 0
       const movedIds: string[] = []
+      const errors: string[] = []
       for (let index = 0; index < ids.length; index += 2_000) {
         const result = await window.jingpan.recycleChatFiles(ids.slice(index, index + 2_000))
         movedToRecycleBin += result.movedToRecycleBin
         failed += result.failed
         movedIds.push(...result.movedIds)
+        errors.push(...result.errors.slice(0, Math.max(0, 20 - errors.length)))
       }
       const removed = new Set(movedIds)
+      const movedItems = movedIds.map((id) => selectedById.get(id)).filter((file): file is ChatFileItem => Boolean(file))
+      const systemBytes = movedItems.filter((file) => file.onSystemDrive).reduce((sum, file) => sum + file.bytes, 0)
+      const otherBytes = movedItems.filter((file) => !file.onSystemDrive).reduce((sum, file) => sum + file.bytes, 0)
+      const movedBytes = systemBytes + otherBytes
       setChatFiles({
         ...chatFiles,
         files: chatFiles.files.filter((file) => !removed.has(file.id)),
@@ -449,9 +525,18 @@ function App(): React.JSX.Element {
           .filter((account) => account.fileCount > 0)
       })
       setSelectedChatFiles(new Set(ids.filter((id) => !removed.has(id))))
+      setRecycleReport({
+        scope: 'chat',
+        moved: movedToRecycleBin,
+        movedBytes,
+        systemBytes,
+        otherBytes,
+        failed,
+        errors
+      })
       setToast({
         tone: failed > 0 ? 'warning' : 'success',
-        text: `${movedToRecycleBin} 个聊天文件已移入回收站${failed ? `，${failed} 个文件已变化、被占用或处理失败` : ''}`
+        text: `${movedToRecycleBin} 个聊天文件（${formatBytes(movedBytes)}）已移入回收站${failed ? `，${failed} 个处理失败` : ''}`
       })
     } catch (error) {
       setToast({ tone: 'warning', text: error instanceof Error ? error.message : '聊天文件未能移入回收站' })
@@ -461,11 +546,13 @@ function App(): React.JSX.Element {
   const confirmDuplicateRecycle = async (): Promise<void> => {
     if (!dialog || dialog.type !== 'duplicate-recycle' || !duplicateFiles) return
     const ids = dialog.ids
+    const selectedById = new Map(duplicateFiles.groups.flatMap((group) => group.files).map((file) => [file.id, file]))
     setDialog(null)
     try {
       const result = await window.jingpan.recycleDuplicateFiles(ids)
-      const { movedToRecycleBin, failed, movedIds } = result
+      const { movedToRecycleBin, failed, movedIds, errors } = result
       const removed = new Set(movedIds)
+      const movedBytes = movedIds.reduce((sum, id) => sum + (selectedById.get(id)?.bytes ?? 0), 0)
       const groups = duplicateFiles.groups
         .map((group) => {
           const files = group.files.filter((file) => !removed.has(file.id))
@@ -483,9 +570,18 @@ function App(): React.JSX.Element {
         reclaimableBytes: groups.reduce((sum, group) => sum + group.reclaimableBytes, 0)
       })
       setSelectedDuplicateFiles(new Set(ids.filter((id) => !removed.has(id))))
+      setRecycleReport({
+        scope: 'duplicates',
+        moved: movedToRecycleBin,
+        movedBytes,
+        systemBytes: movedBytes,
+        otherBytes: 0,
+        failed,
+        errors: errors.slice(0, 20)
+      })
       setToast({
         tone: failed > 0 ? 'warning' : 'success',
-        text: `${movedToRecycleBin} 个重复副本已移入回收站${failed ? `，${failed} 个文件已变化或处理失败` : ''}`
+        text: `${movedToRecycleBin} 个重复副本（${formatBytes(movedBytes)}）已移入回收站${failed ? `，${failed} 个处理失败` : ''}`
       })
     } catch (error) {
       setToast({ tone: 'warning', text: error instanceof Error ? error.message : '重复文件未能移入回收站' })
@@ -642,6 +738,10 @@ function App(): React.JSX.Element {
             onSelectedChange={setSelectedDuplicateFiles}
             onOpen={openDuplicateFile}
             onRecycle={(ids, bytes) => setDialog({ type: 'duplicate-recycle', ids, bytes })}
+            recycleReport={recycleReport?.scope === 'duplicates' ? recycleReport : null}
+            onDismissReport={() => setRecycleReport(null)}
+            onOpenRecycleBin={() => void openRecycleBin()}
+            onGoCleanup={() => setPage('cleanup')}
           />
         )
       case 'chat':
@@ -655,6 +755,10 @@ function App(): React.JSX.Element {
             onSelectedChange={setSelectedChatFiles}
             onOpen={openChatFile}
             onRecycle={(ids, bytes) => setDialog({ type: 'chat-recycle', ids, bytes })}
+            recycleReport={recycleReport?.scope === 'chat' ? recycleReport : null}
+            onDismissReport={() => setRecycleReport(null)}
+            onOpenRecycleBin={() => void openRecycleBin()}
+            onGoCleanup={() => setPage('cleanup')}
           />
         )
       case 'files':
@@ -667,6 +771,10 @@ function App(): React.JSX.Element {
             onSelectedChange={setSelectedFiles}
             onOpen={openUserFile}
             onRecycle={(ids, bytes) => setDialog({ type: 'recycle', ids, bytes })}
+            recycleReport={recycleReport?.scope === 'files' ? recycleReport : null}
+            onDismissReport={() => setRecycleReport(null)}
+            onOpenRecycleBin={() => void openRecycleBin()}
+            onGoCleanup={() => setPage('cleanup')}
           />
         )
       case 'migration':
@@ -698,6 +806,7 @@ function App(): React.JSX.Element {
             onCheck={() => void checkForUpdates(true)}
             onDownload={() => void downloadUpdate()}
             onOpenPage={() => void openUpdatePage()}
+            onOpenData={() => void window.jingpan.openAppDataFolder()}
           />
         )
     }
@@ -917,6 +1026,7 @@ function CleanupPage({
         <EmptyState icon={Sparkles} title="先扫描，再做决定" description="扫描只读取文件大小，不会修改或上传任何内容。" button="扫描可清理内容" onClick={onScan} />
       ) : (
         <>
+          <ScanFreshness scannedAt={scan.scannedAt} />
           {cleanupResult && <div className="result-banner"><CheckCircle2 /><div><strong>上次清理释放了 {formatBytes(cleanupResult.reclaimedBytes)}</strong><span>{cleanupResult.removedFiles.toLocaleString('zh-CN')} 个文件已移除，耗时 {formatDuration(cleanupResult.durationMs)}</span></div></div>}
           <div className="category-list">
             {scan.categories.map((category) => <CleanupCategory key={category.id} category={category} checked={selected.has(category.id)} onToggle={() => onToggle(category.id)} />)}
@@ -949,6 +1059,7 @@ function AnalysisPage({ analysis, busy, onAnalyze }: { analysis: AnalysisResult 
       <PageIntro title="空间分析" description="帮你看清 C 盘空间分布。系统和应用目录只分析，绝不会在这里删除。" action={<button className="secondary-button" onClick={onAnalyze} disabled={Boolean(busy)}><BarChart3 size={17} />{analysis ? '重新分析' : '开始分析'}</button>} />
       {!analysis ? <EmptyState icon={BarChart3} title="看看空间都去哪了" description="完整分析可能需要几分钟，你可以随时停止。" button="分析 C 盘" onClick={onAnalyze} /> : (
         <>
+          <ScanFreshness scannedAt={analysis.analyzedAt} />
           <section className="content-card">
             <div className="section-heading"><div><h2>空间分布</h2><p>分析于 {formatDate(analysis.analyzedAt)}，耗时 {formatDuration(analysis.durationMs)}</p></div><strong>{formatBytes(total)}</strong></div>
             <div className="space-bar">{analysis.groups.filter((group) => group.bytes > 0).map((group) => <span key={group.id} style={{ width: `${Math.max(1, (group.bytes / total) * 100)}%`, background: group.color }} />)}</div>
@@ -1045,22 +1156,212 @@ function PaginationControl({
 function FileRecycleAction({
   selectedCount,
   selectedBytes,
+  currentPageCount,
+  currentPageSelectedCount,
+  hiddenSelectedCount = 0,
+  detail,
+  safetyText = '可从回收站恢复',
   disabled,
+  onTogglePage,
+  onClear,
   onRecycle,
   className = ''
 }: {
   selectedCount: number
   selectedBytes: number
+  currentPageCount?: number
+  currentPageSelectedCount?: number
+  hiddenSelectedCount?: number
+  detail?: string
+  safetyText?: string
   disabled: boolean
+  onTogglePage?: () => void
+  onClear: () => void
   onRecycle: () => void
   className?: string
 }): React.JSX.Element {
+  const allCurrentPageSelected = Boolean(currentPageCount && currentPageSelectedCount === currentPageCount)
   return (
     <div className={`file-recycle-action ${className}`}>
-      <div><span>已选择 {selectedCount} 个文件</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
-      <div className="recoverable-note"><ShieldCheck size={15} />可从回收站恢复</div>
+      <div className="selection-summary">
+        <span>已选择 {selectedCount} 个文件</span>
+        <strong>共 {formatBytes(selectedBytes)}</strong>
+        {detail && <small>{detail}</small>}
+        {hiddenSelectedCount > 0 && <small className="hidden-selection-note">另有 {hiddenSelectedCount} 项不在当前筛选中</small>}
+      </div>
+      <div className="selection-controls">
+        {onTogglePage && currentPageCount !== undefined && currentPageCount > 0 && (
+          <button type="button" onClick={onTogglePage}>{allCurrentPageSelected ? '取消本页' : '全选本页'}</button>
+        )}
+        <button type="button" disabled={selectedCount === 0} onClick={onClear}>清空选择</button>
+      </div>
+      <div className="recoverable-note"><ShieldCheck size={15} />{safetyText}</div>
       <button className="danger-button" disabled={disabled} onClick={onRecycle}><Trash2 size={18} />移入回收站</button>
     </div>
+  )
+}
+
+function SortDirectionButton({ direction, onChange }: { direction: SortDirection; onChange: (value: SortDirection) => void }): React.JSX.Element {
+  const descending = direction === 'desc'
+  const Icon = descending ? ArrowDownNarrowWide : ArrowUpNarrowWide
+  return (
+    <button
+      type="button"
+      className="sort-direction-button"
+      title={`当前为${descending ? '降序' : '升序'}，点击切换`}
+      onClick={() => onChange(descending ? 'asc' : 'desc')}
+    >
+      <Icon size={15} />{descending ? '降序' : '升序'}
+    </button>
+  )
+}
+
+function ScanFreshness({ scannedAt }: { scannedAt: string }): React.JSX.Element {
+  const [now, setNow] = useState(Date.now())
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const stale = isScanStale(scannedAt, now)
+  return (
+    <div className={`scan-freshness ${stale ? 'stale' : ''}`} title={new Date(scannedAt).toLocaleString('zh-CN')}>
+      <Clock3 size={14} />
+      <span>{formatScanAge(scannedAt, now)}</span>
+      {stale && <strong>结果可能已变化，处理前建议重新扫描</strong>}
+    </div>
+  )
+}
+
+function RecycleResultBanner({
+  report,
+  onOpenRecycleBin,
+  onGoCleanup,
+  onDismiss
+}: {
+  report: RecycleReport
+  onOpenRecycleBin: () => void
+  onGoCleanup: () => void
+  onDismiss: () => void
+}): React.JSX.Element {
+  return (
+    <section className={`recycle-result-banner ${report.failed > 0 ? 'has-errors' : ''}`}>
+      <Recycle size={22} />
+      <div className="recycle-result-copy">
+        <strong>已移入回收站 {report.moved} 个文件，共 {formatBytes(report.movedBytes)}</strong>
+        <span>文件仍占用原磁盘空间，清空回收站后才会真正释放。</span>
+        {report.scope === 'chat' && report.otherBytes > 0 && (
+          <small>C 盘 {formatBytes(report.systemBytes)}，其他磁盘 {formatBytes(report.otherBytes)}</small>
+        )}
+        {report.failed > 0 && (
+          <details>
+            <summary>{report.failed} 个文件未处理，查看原因</summary>
+            <ul>{(report.errors.length > 0 ? report.errors : ['文件可能已变化、被占用或没有访问权限']).map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}</ul>
+          </details>
+        )}
+      </div>
+      <div className="recycle-result-actions">
+        <button className="secondary-button" onClick={onOpenRecycleBin}><FolderOpen size={15} />打开回收站</button>
+        <button className="secondary-button" onClick={onGoCleanup}><Sparkles size={15} />前往安全清理</button>
+        <button className="icon-button" title="关闭提示" onClick={onDismiss}><X size={16} /></button>
+      </div>
+    </section>
+  )
+}
+
+function MediaPreviewDialog({
+  items,
+  activeId,
+  scope,
+  selected,
+  onSelect,
+  onActiveChange,
+  onClose,
+  onOpenExternal,
+  onReveal
+}: {
+  items: MediaPreviewItem[]
+  activeId: string
+  scope: FileThumbnailScope
+  selected: Set<string>
+  onSelect: (fileId: string) => void
+  onActiveChange: (fileId: string) => void
+  onClose: () => void
+  onOpenExternal: (fileId: string) => void
+  onReveal: (fileId: string) => void
+}): React.JSX.Element | null {
+  const index = items.findIndex((item) => item.id === activeId)
+  const item = index >= 0 ? items[index] : null
+  const [mediaError, setMediaError] = useState(false)
+  useEffect(() => setMediaError(false), [activeId])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') onClose()
+      if (event.key === 'ArrowLeft' && items.length > 1) {
+        event.preventDefault()
+        const previous = items[(index - 1 + items.length) % items.length]
+        if (previous) onActiveChange(previous.id)
+      }
+      if (event.key === 'ArrowRight' && items.length > 1) {
+        event.preventDefault()
+        const next = items[(index + 1) % items.length]
+        if (next) onActiveChange(next.id)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [index, items, onActiveChange, onClose])
+
+  if (!item) return null
+  const source = `jingpan-media://preview/${scope}/${encodeURIComponent(item.id)}`
+  return createPortal(
+    <div className="media-preview-overlay" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section className="media-preview-dialog" role="dialog" aria-modal="true" aria-label={`预览 ${item.name}`}>
+        <header>
+          <div><strong title={item.name}>{item.name}</strong><span>{index + 1} / {items.length}</span></div>
+          <button className="icon-button" title="关闭预览" onClick={onClose}><X size={19} /></button>
+        </header>
+        <div className="media-preview-stage">
+          {mediaError ? (
+            <div className="media-preview-error"><FileImage size={40} /><strong>此格式暂不能在应用内显示</strong><span>可以使用 Windows 默认应用打开原文件。</span></div>
+          ) : item.kind === 'video' ? (
+            <video key={source} controls preload="metadata" src={source} onError={() => setMediaError(true)} />
+          ) : (
+            <img key={source} src={source} alt={item.name} onError={() => setMediaError(true)} />
+          )}
+          {items.length > 1 && (
+            <>
+              <button
+                className="preview-nav previous"
+                title="上一项（左方向键）"
+                onClick={() => { const previous = items[(index - 1 + items.length) % items.length]; if (previous) onActiveChange(previous.id) }}
+              ><ChevronLeft size={24} /></button>
+              <button
+                className="preview-nav next"
+                title="下一项（右方向键）"
+                onClick={() => { const next = items[(index + 1) % items.length]; if (next) onActiveChange(next.id) }}
+              ><ChevronRight size={24} /></button>
+            </>
+          )}
+        </div>
+        <footer>
+          <div className="media-preview-details">
+            <strong>{formatBytes(item.bytes)}</strong>
+            <span>{formatDate(item.modifiedAt)}</span>
+            <small title={item.path}>{item.path}</small>
+          </div>
+          <div className="media-preview-actions">
+            <button className={`preview-select-button ${selected.has(item.id) ? 'selected' : ''}`} onClick={() => onSelect(item.id)}>
+              <span className={`checkbox ${selected.has(item.id) ? 'checked' : ''}`}>{selected.has(item.id) && <Check size={14} />}</span>
+              {selected.has(item.id) ? '已选择' : '选择此文件'}
+            </button>
+            <button className="secondary-button" onClick={() => onReveal(item.id)}><FolderOpen size={16} />所在位置</button>
+            <button className="secondary-button" onClick={() => onOpenExternal(item.id)}><ExternalLink size={16} />默认应用打开</button>
+          </div>
+        </footer>
+      </section>
+    </div>,
+    document.body
   )
 }
 
@@ -1072,7 +1373,11 @@ function ChatFilesPage({
   onChooseQqFolder,
   onSelectedChange,
   onOpen,
-  onRecycle
+  onRecycle,
+  recycleReport,
+  onDismissReport,
+  onOpenRecycleBin,
+  onGoCleanup
 }: {
   result: ChatFileScanResult | null
   busy: BusyTask
@@ -1082,15 +1387,21 @@ function ChatFilesPage({
   onSelectedChange: (selected: Set<string>) => void
   onOpen: (fileId: string) => void
   onRecycle: (ids: string[], bytes: number) => void
+  recycleReport: RecycleReport | null
+  onDismissReport: () => void
+  onOpenRecycleBin: () => void
+  onGoCleanup: () => void
 }): React.JSX.Element {
   const [platform, setPlatform] = useState<ChatPlatform | 'all'>('all')
   const [account, setAccount] = useState<string | 'all'>('all')
   const [kind, setKind] = useState<ChatFileKind | 'all'>('all')
   const [age, setAge] = useState<'all' | '30' | '90' | '180' | '365'>('all')
   const [search, setSearch] = useState('')
-  const [sort, setSort] = useState<'size' | 'date' | 'name'>('size')
-  const [viewMode, setViewMode] = useState<FileViewMode>('list')
+  const [sort, setSort] = useStoredChoice<FileSortKey>('jingpan.chat.sort', ['size', 'date', 'name'], 'size')
+  const [sortDirection, setSortDirection] = useStoredChoice<SortDirection>('jingpan.chat.sort-direction', ['asc', 'desc'], 'desc')
+  const [viewMode, setViewMode] = useStoredChoice<FileViewMode>('jingpan.chat.view', ['list', 'grid'], 'list')
   const [page, setPage] = useState(1)
+  const [previewId, setPreviewId] = useState<string | null>(null)
   const pageSize = viewMode === 'grid' ? 48 : 50
 
   const platformFiles = useMemo(
@@ -1107,14 +1418,8 @@ function ChatFilesPage({
         && (!ageCutoff || new Date(file.modifiedAt).getTime() <= ageCutoff)
         && (!query || file.name.toLocaleLowerCase('zh-CN').includes(query) || file.path.toLocaleLowerCase('zh-CN').includes(query))
       ))
-      .sort((left, right) => (
-        sort === 'size'
-          ? right.bytes - left.bytes
-          : sort === 'date'
-            ? right.modifiedAt.localeCompare(left.modifiedAt)
-            : left.name.localeCompare(right.name, 'zh-CN')
-      ))
-  }, [platformFiles, account, kind, age, search, sort])
+      .sort((left, right) => compareFiles(left, right, sort, sortDirection))
+  }, [platformFiles, account, kind, age, search, sort, sortDirection])
 
   const availableAccounts = useMemo(
     () => (result?.accounts ?? []).filter((item) => platform === 'all' || item.platform === platform),
@@ -1123,7 +1428,16 @@ function ChatFilesPage({
   useEffect(() => {
     if (account !== 'all' && !availableAccounts.some((item) => item.id === account)) setAccount('all')
   }, [account, availableAccounts])
-  useEffect(() => setPage(1), [platform, account, kind, age, search, sort, result])
+  useEffect(() => setPage(1), [platform, account, kind, age, search, sort, sortDirection, viewMode, result])
+  useEffect(() => {
+    setPlatform('all')
+    setAccount('all')
+    setKind('all')
+    setAge('all')
+    setSearch('')
+    setPage(1)
+    setPreviewId(null)
+  }, [result?.scannedAt])
 
   const kindCounts = useMemo(() => {
     const map = new Map<ChatFileKind, number>()
@@ -1162,12 +1476,36 @@ function ChatFilesPage({
   const shown = filtered.slice((page - 1) * pageSize, page * pageSize)
   const selectedItems = (result?.files ?? []).filter((file) => selected.has(file.id))
   const selectedBytes = selectedItems.reduce((sum, file) => sum + file.bytes, 0)
+  const systemSelectedBytes = selectedItems.filter((file) => file.onSystemDrive).reduce((sum, file) => sum + file.bytes, 0)
+  const otherSelectedBytes = selectedBytes - systemSelectedBytes
+  const filteredSelectedCount = filtered.filter((file) => selected.has(file.id)).length
+  const hiddenSelectedCount = Math.max(0, selected.size - filteredSelectedCount)
+  const currentPageSelectedCount = shown.filter((file) => selected.has(file.id)).length
   const allShownSelected = shown.length > 0 && shown.every((file) => selected.has(file.id))
+  const previewItems = filtered.filter((file): file is ChatFileItem & { kind: 'image' | 'video' } => (
+    file.previewable && (file.kind === 'image' || file.kind === 'video')
+  ))
+  useEffect(() => {
+    if (previewId && !previewItems.some((file) => file.id === previewId)) setPreviewId(null)
+  }, [previewId, previewItems])
+  const openFile = (file: ChatFileItem): void => {
+    if (file.previewable && (file.kind === 'image' || file.kind === 'video')) setPreviewId(file.id)
+    else onOpen(file.id)
+  }
   const toggleShown = (): void => {
     const next = new Set(selected)
     if (allShownSelected) shown.forEach((file) => next.delete(file.id))
-    else shown.forEach((file) => next.add(file.id))
+    else {
+      for (const file of shown) {
+        if (next.size >= 2_000) break
+        next.add(file.id)
+      }
+    }
     onSelectedChange(next)
+  }
+  const toggleFile = (fileId: string): void => {
+    if (!selected.has(fileId) && selected.size >= 2_000) return
+    onSelectedChange(toggleSet(selected, fileId))
   }
 
   return (
@@ -1205,6 +1543,7 @@ function ChatFilesPage({
           <button className="secondary-button" onClick={onChooseQqFolder} disabled={Boolean(busy)}><FolderSearch size={16} />选择目录</button>
         </div>
       )}
+      {recycleReport && <RecycleResultBanner report={recycleReport} onOpenRecycleBin={onOpenRecycleBin} onGoCleanup={onGoCleanup} onDismiss={onDismissReport} />}
       {!result ? (
         <EmptyState
           icon={MessageCircle}
@@ -1216,6 +1555,7 @@ function ChatFilesPage({
       ) : (
         <>
           {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>文件数量较多</strong>共找到 {result.totalMatched.toLocaleString('zh-CN')} 项，当前展示占用最大的 {result.files.length.toLocaleString('zh-CN')} 项。</span></div>}
+          <ScanFreshness scannedAt={result.scannedAt} />
           <div className="chat-platform-grid">
             {([
               ['all', '全部聊天文件', MessageCircle],
@@ -1261,21 +1601,35 @@ function ChatFilesPage({
                   <select value={account} onChange={(event) => setAccount(event.target.value)}><option value="all">全部账号</option>{availableAccounts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select>
                   <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="30">30 天未修改</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
                   <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
+                  <SortDirectionButton direction={sortDirection} onChange={setSortDirection} />
                   <FileViewToggle value={viewMode} onChange={setViewMode} />
                   <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
                 </div>
-                <FileRecycleAction className="top-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
+                <FileRecycleAction
+                  className="top-action"
+                  selectedCount={selected.size}
+                  selectedBytes={selectedBytes}
+                  currentPageCount={shown.length}
+                  currentPageSelectedCount={currentPageSelectedCount}
+                  hiddenSelectedCount={hiddenSelectedCount}
+                  detail={`C 盘 ${formatBytes(systemSelectedBytes)}${otherSelectedBytes > 0 ? `，其他磁盘 ${formatBytes(otherSelectedBytes)}` : ''}`}
+                  safetyText="清空回收站后释放空间"
+                  disabled={selected.size === 0}
+                  onTogglePage={toggleShown}
+                  onClear={() => onSelectedChange(new Set())}
+                  onRecycle={() => onRecycle([...selected], selectedBytes)}
+                />
                 {viewMode === 'list' ? (
                   <>
-                    <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（可预览时点击打开）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
+                    <div className="chat-file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} title={allShownSelected ? '取消选择本页' : '全选本页'} aria-label={allShownSelected ? '取消选择本页' : '全选本页'} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（图片和视频在应用内预览）</span><span>来源</span><span>修改日期</span><span>大小</span><span /></div>
                     <div className="chat-file-table">
                       {shown.length === 0 ? <div className="minor-empty">没有符合条件的聊天文件</div> : shown.map((file) => (
                         <ChatFileRow
                           key={file.id}
                           file={file}
                           checked={selected.has(file.id)}
-                          onOpen={() => onOpen(file.id)}
-                          onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
+                          onOpen={() => openFile(file)}
+                          onToggle={() => toggleFile(file.id)}
                         />
                       ))}
                     </div>
@@ -1287,18 +1641,30 @@ function ChatFilesPage({
                         key={file.id}
                         file={file}
                         checked={selected.has(file.id)}
-                        onOpen={() => onOpen(file.id)}
-                        onToggle={() => onSelectedChange(toggleSet(selected, file.id))}
+                        onOpen={() => openFile(file)}
+                        onToggle={() => toggleFile(file.id)}
                       />
                     ))}
                   </div>
                 )}
                 <PaginationControl page={page} pageCount={pageCount} onPageChange={setPage} />
               </section>
-              <FileRecycleAction className="sticky-action file-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
             </>
           )}
         </>
+      )}
+      {previewId && (
+        <MediaPreviewDialog
+          items={previewItems}
+          activeId={previewId}
+          scope="chat"
+          selected={selected}
+          onSelect={toggleFile}
+          onActiveChange={setPreviewId}
+          onClose={() => setPreviewId(null)}
+          onOpenExternal={onOpen}
+          onReveal={(fileId) => { void window.jingpan.revealChatFile(fileId) }}
+        />
       )}
     </div>
   )
@@ -1397,7 +1763,11 @@ function DuplicateFilesPage({
   onScan,
   onSelectedChange,
   onOpen,
-  onRecycle
+  onRecycle,
+  recycleReport,
+  onDismissReport,
+  onOpenRecycleBin,
+  onGoCleanup
 }: {
   result: DuplicateFileScanResult | null
   busy: BusyTask
@@ -1406,9 +1776,22 @@ function DuplicateFilesPage({
   onSelectedChange: (selected: Set<string>) => void
   onOpen: (fileId: string) => void
   onRecycle: (ids: string[], bytes: number) => void
+  recycleReport: RecycleReport | null
+  onDismissReport: () => void
+  onOpenRecycleBin: () => void
+  onGoCleanup: () => void
 }): React.JSX.Element {
   const files = useMemo(() => result?.groups.flatMap((group) => group.files) ?? [], [result])
   const selectedBytes = files.filter((file) => selected.has(file.id)).reduce((sum, file) => sum + file.bytes, 0)
+  const [previewId, setPreviewId] = useState<string | null>(null)
+  const previewItems = files.filter((file): file is UserFileItem & { kind: 'image' | 'video' } => file.kind === 'image' || file.kind === 'video')
+  useEffect(() => {
+    if (previewId && !previewItems.some((file) => file.id === previewId)) setPreviewId(null)
+  }, [previewId, previewItems])
+  const openFile = (file: UserFileItem): void => {
+    if (file.kind === 'image' || file.kind === 'video') setPreviewId(file.id)
+    else onOpen(file.id)
+  }
 
   const smartSelect = (): void => {
     const next = new Set<string>()
@@ -1446,6 +1829,8 @@ function DuplicateFilesPage({
         <ShieldCheck size={19} />
         <span><strong>内容核对，不凭文件名猜测</strong>只扫描 C 盘个人目录中 1 MB 以上的图片、视频、音频、文档、压缩包和安装包；OneDrive 等云目录不会读取内容，避免触发下载。</span>
       </div>
+      {recycleReport && <RecycleResultBanner report={recycleReport} onOpenRecycleBin={onOpenRecycleBin} onGoCleanup={onGoCleanup} onDismiss={onDismissReport} />}
+      {result && <ScanFreshness scannedAt={result.scannedAt} />}
       {!result ? (
         <EmptyState icon={CopyCheck} title="找出真正相同的文件副本" description="扫描会读取本地文件内容并计算 SHA-256，不上传文件。耗时取决于需要核对的文件大小。" button="开始核对" onClick={onScan} />
       ) : result.groups.length === 0 ? (
@@ -1464,6 +1849,15 @@ function DuplicateFilesPage({
             <div><strong>{formatBytes(result.reclaimableBytes)}</strong><span>最多可回收</span></div>
             <button onClick={smartSelect}><CopyCheck size={18} /><span><strong>智能选择副本</strong><small>每组保留最近修改的一份</small></span></button>
           </div>
+          <FileRecycleAction
+            className="top-action duplicate-top-action"
+            selectedCount={selected.size}
+            selectedBytes={selectedBytes}
+            safetyText="每组至少保留一份，清空回收站后释放空间"
+            disabled={selected.size === 0}
+            onClear={() => onSelectedChange(new Set())}
+            onRecycle={() => onRecycle([...selected], selectedBytes)}
+          />
           <div className="duplicate-groups">
             {result.groups.map((group, groupIndex) => {
               const selectedInGroup = group.files.filter((file) => selected.has(file.id)).length
@@ -1480,7 +1874,7 @@ function DuplicateFilesPage({
                         file={file}
                         checked={selected.has(file.id)}
                         selectionDisabled={!selected.has(file.id) && (selectedInGroup >= group.files.length - 1 || selected.size >= 2_000)}
-                        onOpen={() => onOpen(file.id)}
+                        onOpen={() => openFile(file)}
                         onToggle={() => toggleFile(group.id, file.id)}
                         onReveal={() => void window.jingpan.revealDuplicateFile(file.id)}
                         thumbnailScope="duplicate"
@@ -1491,12 +1885,23 @@ function DuplicateFilesPage({
               )
             })}
           </div>
-          <div className="sticky-action file-action">
-            <div><span>已选择 {selected.size} 个重复副本</span><strong>共 {formatBytes(selectedBytes)}</strong></div>
-            <div className="recoverable-note"><ShieldCheck size={15} />每组至少保留一份 · 可从回收站恢复</div>
-            <button className="danger-button" disabled={selected.size === 0} onClick={() => onRecycle([...selected], selectedBytes)}><Trash2 size={18} />移入回收站</button>
-          </div>
         </>
+      )}
+      {previewId && (
+        <MediaPreviewDialog
+          items={previewItems}
+          activeId={previewId}
+          scope="duplicate"
+          selected={selected}
+          onSelect={(fileId) => {
+            const group = result?.groups.find((candidate) => candidate.files.some((file) => file.id === fileId))
+            if (group) toggleFile(group.id, fileId)
+          }}
+          onActiveChange={setPreviewId}
+          onClose={() => setPreviewId(null)}
+          onOpenExternal={onOpen}
+          onReveal={(fileId) => { void window.jingpan.revealDuplicateFile(fileId) }}
+        />
       )}
     </div>
   )
@@ -1509,7 +1914,11 @@ function PersonalFilesPage({
   onScan,
   onSelectedChange,
   onOpen,
-  onRecycle
+  onRecycle,
+  recycleReport,
+  onDismissReport,
+  onOpenRecycleBin,
+  onGoCleanup
 }: {
   result: UserFileScanResult | null
   busy: BusyTask
@@ -1518,14 +1927,20 @@ function PersonalFilesPage({
   onSelectedChange: (selected: Set<string>) => void
   onOpen: (fileId: string) => void
   onRecycle: (ids: string[], bytes: number) => void
+  recycleReport: RecycleReport | null
+  onDismissReport: () => void
+  onOpenRecycleBin: () => void
+  onGoCleanup: () => void
 }): React.JSX.Element {
   const [kind, setKind] = useState<UserFileKind | 'all'>('all')
   const [location, setLocation] = useState<UserFileLocation | 'all'>('all')
   const [age, setAge] = useState<'all' | '90' | '180' | '365'>('all')
   const [search, setSearch] = useState('')
-  const [sort, setSort] = useState<'size' | 'date' | 'name'>('size')
-  const [viewMode, setViewMode] = useState<FileViewMode>('list')
+  const [sort, setSort] = useStoredChoice<FileSortKey>('jingpan.files.sort', ['size', 'date', 'name'], 'size')
+  const [sortDirection, setSortDirection] = useStoredChoice<SortDirection>('jingpan.files.sort-direction', ['asc', 'desc'], 'desc')
+  const [viewMode, setViewMode] = useStoredChoice<FileViewMode>('jingpan.files.view', ['list', 'grid'], 'list')
   const [page, setPage] = useState(1)
+  const [previewId, setPreviewId] = useState<string | null>(null)
   const pageSize = viewMode === 'grid' ? 48 : 50
 
   const filtered = useMemo(() => {
@@ -1537,15 +1952,34 @@ function PersonalFilesPage({
       && (!ageCutoff || new Date(file.modifiedAt).getTime() <= ageCutoff)
       && (!query || file.name.toLocaleLowerCase('zh-CN').includes(query) || file.path.toLocaleLowerCase('zh-CN').includes(query))
     ))
-    return items.sort((a, b) => sort === 'size' ? b.bytes - a.bytes : sort === 'date' ? b.modifiedAt.localeCompare(a.modifiedAt) : a.name.localeCompare(b.name, 'zh-CN'))
-  }, [result, kind, location, age, search, sort])
+    return items.sort((a, b) => compareFiles(a, b, sort, sortDirection))
+  }, [result, kind, location, age, search, sort, sortDirection])
 
-  useEffect(() => setPage(1), [kind, location, age, search, sort, result])
+  useEffect(() => setPage(1), [kind, location, age, search, sort, sortDirection, viewMode, result])
+  useEffect(() => {
+    setKind('all')
+    setLocation('all')
+    setAge('all')
+    setSearch('')
+    setPage(1)
+    setPreviewId(null)
+  }, [result?.scannedAt])
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize))
   const shown = filtered.slice((page - 1) * pageSize, page * pageSize)
   const selectedItems = (result?.files ?? []).filter((file) => selected.has(file.id))
   const selectedBytes = selectedItems.reduce((sum, file) => sum + file.bytes, 0)
+  const filteredSelectedCount = filtered.filter((file) => selected.has(file.id)).length
+  const hiddenSelectedCount = Math.max(0, selected.size - filteredSelectedCount)
+  const currentPageSelectedCount = shown.filter((file) => selected.has(file.id)).length
   const allShownSelected = shown.length > 0 && shown.every((file) => selected.has(file.id))
+  const previewItems = filtered.filter((file): file is UserFileItem & { kind: 'image' | 'video' } => file.kind === 'image' || file.kind === 'video')
+  useEffect(() => {
+    if (previewId && !previewItems.some((file) => file.id === previewId)) setPreviewId(null)
+  }, [previewId, previewItems])
+  const openFile = (file: UserFileItem): void => {
+    if (file.kind === 'image' || file.kind === 'video') setPreviewId(file.id)
+    else onOpen(file.id)
+  }
 
   const counts = useMemo(() => {
     const map = new Map<UserFileKind, number>()
@@ -1556,16 +1990,27 @@ function PersonalFilesPage({
   const toggleShown = (): void => {
     const next = new Set(selected)
     if (allShownSelected) shown.forEach((file) => next.delete(file.id))
-    else shown.forEach((file) => next.add(file.id))
+    else {
+      for (const file of shown) {
+        if (next.size >= 2_000) break
+        next.add(file.id)
+      }
+    }
     onSelectedChange(next)
+  }
+  const toggleFile = (fileId: string): void => {
+    if (!selected.has(fileId) && selected.size >= 2_000) return
+    onSelectedChange(toggleSet(selected, fileId))
   }
 
   return (
     <div className="page-stack">
       <PageIntro title="个人文件" description="整理位于 C 盘的图片、视频、音频、文本和办公文档。点击文件行可直接打开预览，只有勾选的文件才会移入回收站。" action={<button className="secondary-button" onClick={onScan} disabled={Boolean(busy)}><RefreshCw size={17} />{result ? '重新整理' : '扫描个人文件'}</button>} />
+      {recycleReport && <RecycleResultBanner report={recycleReport} onOpenRecycleBin={onOpenRecycleBin} onGoCleanup={onGoCleanup} onDismiss={onDismissReport} />}
       {!result ? <EmptyState icon={FileText} title="整理 C 盘个人文件，找回更多空间" description="读取 Windows 真实的桌面、下载、文档、图片、视频和音乐位置，并包含 C 盘 OneDrive；不读取文件内容。" button="开始整理" onClick={onScan} /> : (
         <>
           {result.truncated && <div className="info-banner"><CircleHelp size={19} /><span><strong>文件数量较多</strong>共找到 {result.totalMatched.toLocaleString('zh-CN')} 项，当前展示占用最大的 {result.files.length.toLocaleString('zh-CN')} 项。</span></div>}
+          <ScanFreshness scannedAt={result.scannedAt} />
           <div className="file-kind-tabs">
             <button className={kind === 'all' ? 'active' : ''} onClick={() => setKind('all')}><HardDrive size={17} />全部 <span>{result.files.length}</span></button>
             {(Object.keys(FILE_KIND_META) as UserFileKind[]).map((key) => {
@@ -1580,26 +2025,51 @@ function PersonalFilesPage({
               <select value={location} onChange={(event) => setLocation(event.target.value as typeof location)}><option value="all">全部位置</option><option value="downloads">下载目录</option><option value="desktop">桌面</option><option value="documents">文档</option><option value="pictures">图片</option><option value="videos">视频</option><option value="music">音乐</option><option value="onedrive">OneDrive</option></select>
               <select value={age} onChange={(event) => setAge(event.target.value as typeof age)}><option value="all">全部时间</option><option value="90">90 天未修改</option><option value="180">半年未修改</option><option value="365">一年未修改</option></select>
               <select value={sort} onChange={(event) => setSort(event.target.value as typeof sort)}><option value="size">按大小排序</option><option value="date">按修改日期排序</option><option value="name">按名称排序</option></select>
+              <SortDirectionButton direction={sortDirection} onChange={setSortDirection} />
               <FileViewToggle value={viewMode} onChange={setViewMode} />
               <span>共 {filtered.length.toLocaleString('zh-CN')} 项</span>
             </div>
-            <FileRecycleAction className="top-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
+            <FileRecycleAction
+              className="top-action"
+              selectedCount={selected.size}
+              selectedBytes={selectedBytes}
+              currentPageCount={shown.length}
+              currentPageSelectedCount={currentPageSelectedCount}
+              hiddenSelectedCount={hiddenSelectedCount}
+              safetyText="清空回收站后释放空间"
+              disabled={selected.size === 0}
+              onTogglePage={toggleShown}
+              onClear={() => onSelectedChange(new Set())}
+              onRecycle={() => onRecycle([...selected], selectedBytes)}
+            />
             {viewMode === 'list' ? (
               <>
-                <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（点击可打开或预览）</span><span>修改日期</span><span>大小</span><span /></div>
+                <div className="file-table-head"><button className={`checkbox ${allShownSelected ? 'checked' : ''}`} title={allShownSelected ? '取消选择本页' : '全选本页'} aria-label={allShownSelected ? '取消选择本页' : '全选本页'} onClick={toggleShown}>{allShownSelected && <Check size={14} />}</button><span>文件（图片和视频在应用内预览）</span><span>修改日期</span><span>大小</span><span /></div>
                 <div className="file-table">
-                  {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
+                  {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileRow key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => openFile(file)} onToggle={() => toggleFile(file.id)} />)}
                 </div>
               </>
             ) : (
               <div className="file-grid">
-                {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileCard key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => onOpen(file.id)} onToggle={() => onSelectedChange(toggleSet(selected, file.id))} />)}
+                {shown.length === 0 ? <div className="minor-empty">没有符合条件的文件</div> : shown.map((file) => <UserFileCard key={file.id} file={file} checked={selected.has(file.id)} onOpen={() => openFile(file)} onToggle={() => toggleFile(file.id)} />)}
               </div>
             )}
             <PaginationControl page={page} pageCount={pageCount} onPageChange={setPage} />
           </section>
-          <FileRecycleAction className="sticky-action file-action" selectedCount={selected.size} selectedBytes={selectedBytes} disabled={selected.size === 0} onRecycle={() => onRecycle([...selected], selectedBytes)} />
         </>
+      )}
+      {previewId && (
+        <MediaPreviewDialog
+          items={previewItems}
+          activeId={previewId}
+          scope="user"
+          selected={selected}
+          onSelect={toggleFile}
+          onActiveChange={setPreviewId}
+          onClose={() => setPreviewId(null)}
+          onOpenExternal={onOpen}
+          onReveal={(fileId) => { void window.jingpan.revealUserFile(fileId) }}
+        />
       )}
     </div>
   )
@@ -1979,6 +2449,7 @@ function MigrationPage({
         />
       ) : (
         <>
+          <ScanFreshness scannedAt={result.scannedAt} />
           <section className="migration-summary">
             <div data-liquid-glass data-glass-depth="30"><span>D 盘可用</span><strong>{formatBytes(result.destinationFreeBytes)}</strong><small>{result.destinationRoot}</small></div>
             <div data-liquid-glass data-glass-depth="30"><span>推荐迁移</span><strong>{formatBytes(result.recommendedBytes)}</strong><small>{recommendedCount.toLocaleString('zh-CN')} 个高置信文件</small></div>
@@ -2080,7 +2551,8 @@ function SettingsPage({
   checking,
   onCheck,
   onDownload,
-  onOpenPage
+  onOpenPage,
+  onOpenData
 }: {
   snapshot: AppSnapshot
   update: UpdateCheckResult | null
@@ -2088,6 +2560,7 @@ function SettingsPage({
   onCheck: () => void
   onDownload: () => void
   onOpenPage: () => void
+  onOpenData: () => void
 }): React.JSX.Element {
   const updateDescription = checking
     ? '正在连接 GitHub 检查正式版本…'
@@ -2109,6 +2582,7 @@ function SettingsPage({
         </div>
         <div><span className="setting-icon"><ShieldCheck /></span><span><strong>安全清理白名单</strong><small>只允许清理程序内置的临时文件和缓存目录，界面无法提交任意路径。</small></span><em className="enabled-badge">已开启</em></div>
         <div><span className="setting-icon"><MonitorCog /></span><span><strong>管理员权限</strong><small>{snapshot.isAdministrator ? '当前以管理员身份运行，可扫描更多 Windows 临时文件。' : '当前为普通权限；受保护文件会被安全跳过，无需特意提权。'}</small></span><em className={snapshot.isAdministrator ? 'enabled-badge' : 'neutral-badge'}>{snapshot.isAdministrator ? '管理员' : '普通权限'}</em></div>
+        <div><span className="setting-icon"><FolderOpen /></span><span><strong>缓存与设置位置</strong><small title={snapshot.dataPath}>{snapshot.portableMode ? '项目内存储已开启：' : 'Windows 默认存储：'}{snapshot.dataPath}</small></span><button className="link-button" onClick={onOpenData}>打开位置</button></div>
         <div><span className="setting-icon"><HardDrive /></span><span><strong>Windows 清理建议</strong><small>查看以前的 Windows 安装、大型或未使用文件、云同步文件和闲置应用等官方建议。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageRecommendations()}>打开建议</button></div>
         <div><span className="setting-icon"><RefreshCw /></span><span><strong>自动存储感知</strong><small>设置 Windows 何时自动清理临时文件、回收站和本地云文件；下载目录默认不会被处理。</small></span><button className="link-button" onClick={() => void window.jingpan.openStorageSenseSettings()}>设置规则</button></div>
         <div><span className="setting-icon"><FolderOpen /></span><span><strong>新内容保存位置</strong><small>把新应用、文档、音乐、图片和视频的默认保存位置改到其他磁盘，减少 C 盘再次变满。</small></span><button className="link-button" onClick={() => void window.jingpan.openSaveLocations()}>选择位置</button></div>
@@ -2167,6 +2641,7 @@ function InstalledAppsPage({
       <div className="info-banner"><CircleHelp size={19} /><span><strong>“最后使用”是参考信息</strong>部分软件不会向 Windows 提供完整使用记录；“未发现记录”不代表从未使用，请结合名称、大小和用途判断。</span></div>
       {!result ? <EmptyState icon={AppWindow} title="找出安装后被遗忘的软件" description="读取 Windows 已安装应用与当前用户的使用记录，不会扫描软件内容。" button="查看已安装应用" onClick={onScan} /> : (
         <>
+          <ScanFreshness scannedAt={result.scannedAt} />
           <div className="app-summary-grid">
             <button className={filter === 'very-stale' ? 'active' : ''} onClick={() => setFilter('very-stale')}><strong>{counts['very-stale']}</strong><span>半年以上未用</span></button>
             <button className={filter === 'stale' ? 'active' : ''} onClick={() => setFilter('stale')}><strong>{counts.stale}</strong><span>2-6 个月未用</span></button>

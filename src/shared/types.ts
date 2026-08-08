@@ -37,6 +37,8 @@ export interface AppSnapshot {
   disk: DiskSummary
   categories: CategoryMeta[]
   isAdministrator: boolean
+  dataPath: string
+  portableMode: boolean
 }
 
 export interface TaskProgress {
@@ -363,6 +365,8 @@ export interface JingpanApi {
   openStorageSenseSettings: () => Promise<void>
   openSaveLocations: () => Promise<void>
   openDiskCleanup: () => Promise<void>
+  openAppDataFolder: () => Promise<boolean>
+  openRecycleBin: () => Promise<boolean>
   scanUserFiles: () => Promise<UserFileScanResult>
   cancelUserFileScan: () => Promise<void>
   recycleUserFiles: (fileIds: string[]) => Promise<UserFileDeleteResult>

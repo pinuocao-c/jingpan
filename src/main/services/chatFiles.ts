@@ -414,7 +414,7 @@ async function discoverWeChatRoots(documentRoots: string[]): Promise<ChatScanRoo
   const roots: ChatScanRoot[] = []
   const seen = new Set<string>()
   for (const base of bases) {
-    if (!existsSync(base) || !isOnSystemDrive(base)) continue
+    if (!existsSync(base) || !isLocalDrivePath(base)) continue
     let accounts
     let realBase: string
     try {
@@ -463,7 +463,8 @@ async function discoverWeChatRoots(documentRoots: string[]): Promise<ChatScanRoo
           relativePath,
           area,
           base,
-          'automatic'
+          'automatic',
+          true
         )
       }
     }

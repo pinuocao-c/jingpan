@@ -1,6 +1,6 @@
 {
   "name": "jingpan",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "一个安全、直观的 Windows C 盘清理与空间管理工具",
   "main": "out/main/index.js",
   "author": "Jingpan Contributors",
@@ -15,15 +15,15 @@
     "url": "https://github.com/pinuocao-c/jingpan/issues"
   },
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/with-project-cache.cjs electron-vite dev",
     "generate:icon": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/generate-icon.ps1",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && node scripts/with-project-cache.cjs electron-vite build",
     "check:release-notes": "node scripts/verify-release-notes.cjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dist": "npm run build && electron-builder --win nsis --publish never",
-    "dist:portable": "npm run build && electron-builder --win portable --publish never"
+    "dist": "npm run build && node scripts/with-project-cache.cjs electron-builder --win nsis --publish never",
+    "dist:portable": "npm run build && node scripts/with-project-cache.cjs electron-builder --win portable --publish never"
   },
   "build": {
     "appId": "com.jingpan.desktop",
